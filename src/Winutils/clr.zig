@@ -48,6 +48,17 @@ pub fn print16(s: anytype) void {
     std.debug.print("\n", .{});
 }
 
+pub fn getShortName(s: [:0]u16) [:0]u16 {
+    var lastSlash: usize = 0;
+
+    for (s, 0..) |chr, i| {
+        if (chr == '\\') {
+            lastSlash = i;
+        }
+    }
+    return @ptrCast(s[lastSlash + 1 .. s.len]);
+}
+
 pub fn looksLikeAscii(possible_str: []const u8) bool {
     for (possible_str) |c| {
         if (c < 20 or c > 'z' or c == '@') {

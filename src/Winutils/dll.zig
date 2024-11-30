@@ -138,11 +138,17 @@ pub fn GetProcAddress(hModule: [*]u8, procname: [*:0]const u8) callconv(.C) ?*vo
 pub fn GetModuleHandleA(moduleName_: ?[*:0]const u8) callconv(.C) ?[*]u8 {
     log.setContext(logtags.HookF);
     defer log.rollbackContext();
+
+    const self = GLOBAL_DLL_LOADER;
+
     if (moduleName_) |moduleName| {
         log.info("[+] Hit GMHA {s}\n", .{moduleName});
-        const self = GLOBAL_DLL_LOADER;
-        const utf16name: [*:0]u16 = @ptrCast(clr.lstring(self.Allocator, moduleName[0 .. std.mem.len(moduleName) + 1]) catch return null);
-        return GetModuleHandleW(utf16name);
+        const alloc_utf16name = clr.lstring(self.Allocator, moduleName[0 .. std.mem.len(moduleName) + 1]) catch return null;
+        const utf16name: [*:0]u16 = @ptrCast(alloc_utf16name);
+        defer self.Allocator.free(alloc_utf16name);
+        const module = GetModuleHandleW(utf16name);
+        //module local const is needed so the utf16 is freed
+        return module;
     } else {
         const peb: usize = asm volatile ("mov %gs:0x60, %rax"
             : [peb] "={rax}" (-> usize),
@@ -166,13 +172,14 @@ pub fn GetModuleHandleW(moduleName16_: ?[*:0]const u16) callconv(.C) ?[*]u8 {
         const len = std.mem.len(moduleName16) + 1;
         log.info16("[+] GMHW name \n", .{}, moduleName16[0..len]);
         const self = GLOBAL_DLL_LOADER;
-        const dllPath = (self.getDllPaths(@ptrCast(moduleName16[0..len])) catch {
+        var dllPath = (self.getDllPaths(@ptrCast(moduleName16[0..len])) catch {
             log.crit("Unable to discover a path\n", .{});
             return null;
         }) orelse {
             log.crit("Unable to discover a path\n", .{});
             return null;
         };
+        dllPath.normalize();
         log.info16("Resolved shortname of a module: ", .{}, dllPath.shortPath16);
         if (self.LoadedDlls.contains(@constCast(dllPath.shortPath16))) {
             return self.LoadedDlls.get(@constCast(dllPath.shortPath16)).?.BaseAddr;
@@ -216,11 +223,15 @@ pub fn LoadLibraryW_stub(libname16: [*:0]u16) callconv(.C) ?[*]u8 {
 
 pub fn LoadLibraryA_stub(libname: [*:0]u8) callconv(.C) ?[*]u8 {
     log.crit("Someone actually did a loadlibraryA {s}\n", .{libname});
-    const libname16 = lstring(GLOBAL_DLL_LOADER.Allocator, libname[0 .. std.mem.len(libname) + 1]) catch {
+    const self = GLOBAL_DLL_LOADER;
+
+    const libname16 = lstring(self.Allocator, libname[0 .. std.mem.len(libname) + 1]) catch {
         log.crit("Failed to allocate string\n", .{});
         return null;
     };
-    return LoadLibraryW_stub(@ptrCast(libname16.ptr));
+    defer self.Allocator.free(libname16);
+    const library = LoadLibraryW_stub(@ptrCast(libname16.ptr));
+    return library;
 }
 
 const MappingContext = struct {
@@ -249,6 +260,31 @@ const lstring = clr.lstring;
 pub const DllPath = struct {
     path16: [:0]u16,
     shortPath16: [:0]u16,
+    allocated_buf: ?[]u16 = null,
+
+    const Self = @This();
+
+    pub fn normalize(self: *Self) void {
+        // We dont really care about the fullPath
+        // so the only thing normalized is shortPath
+        // because its used as a key when we access LoadedDlls
+
+        var i: usize = 0;
+        while (self.shortPath16[i] != 0) {
+            const char = self.shortPath16[i];
+            // Check if the character is an uppercase ASCII English letter
+            if (char >= 'A' and char <= 'Z') {
+                self.shortPath16[i] = char + ('a' - 'A');
+            }
+            i += 1;
+        }
+    }
+
+    pub fn free(self: *Self, allocator: std.mem.Allocator) void {
+        if (self.allocated_buf) |memory_to_free| {
+            allocator.free(memory_to_free);
+        }
+    }
 };
 
 pub const DllLoader = struct {
@@ -275,6 +311,7 @@ pub const DllLoader = struct {
         var curr: *winc.LIST_ENTRY = head.Flink;
         var count: usize = 0;
         var skipcount: i32 = 2;
+        //At this point the allocator should be fixed buffer or something similar, disconnected from WINapi
         self.LoadedDlls = u16HashMapType.init(self.Allocator);
         //Skipping ListHead and .exe selfmodule
         while (count < 1000) : ({
@@ -398,6 +435,8 @@ pub const DllLoader = struct {
         const exportAddressTable: [*]i32 = @ptrCast(@alignCast(dll_bytes[export_descriptor.AddressOfFunctions..]));
         const exportNamePointerTable: [*]i32 = @ptrCast(@alignCast(dll_bytes[export_descriptor.AddressOfNames..]));
         const exportNameOrdinalTable: [*]u16 = @ptrCast(@alignCast(dll_bytes[export_descriptor.AddressOfNameOrdinals..]));
+
+        //static lifetime
         dll.NameExports = std.StringHashMap(*void).init(self.Allocator);
         dll.OrdinalExports = std.AutoHashMap(u16, *void).init(self.Allocator);
 
@@ -430,7 +469,7 @@ pub const DllLoader = struct {
     pub fn getDllPaths(self: *@This(), libname16_: [:0]const u16) !?*DllPath {
 
         //Resolve dll path from PATH env var or CWD
-        const kernel32_s = try lstring(self.Allocator, "KERNEL32.DLL");
+        const kernel32_s = try lstring(self.Allocator, "kernel32.dll");
         defer self.Allocator.free(kernel32_s);
         const kernel32 = self.LoadedDlls.get(kernel32_s).?.NameExports;
 
@@ -443,7 +482,9 @@ pub const DllLoader = struct {
         const dllPath: *DllPath = try self.Allocator.create(DllPath);
 
         if (clr.isFullPath(libname16_)) |symbol| {
-            dllPath.path16 = @constCast(libname16_);
+            const copy_fullname16 = try self.Allocator.alloc(u16, libname16_.len);
+            @memcpy(copy_fullname16, libname16_);
+            dllPath.path16 = @ptrCast(copy_fullname16);
             var start_index: usize = 0;
             for (dllPath.path16, 0..) |item, index| {
                 if (item == symbol) {
@@ -451,13 +492,13 @@ pub const DllLoader = struct {
                 }
             }
             dllPath.shortPath16 = dllPath.path16[start_index..];
+            dllPath.allocated_buf = copy_fullname16;
         } else {
             dllPath.path16 = @ptrCast(try self.Allocator.alloc(u16, 260));
             var PATH: [33000:0]u16 = undefined;
             const PATH_s = try lstring(self.Allocator, "PATH");
 
             var len: usize = GetEnvironmentVariable(PATH_s.ptr, &PATH, 32767);
-            self.Allocator.free(PATH_s);
             PATH[len] = @intCast('.');
             PATH[len + 1] = @intCast('\\');
             PATH[len + 2] = @intCast(';');
@@ -476,7 +517,8 @@ pub const DllLoader = struct {
                     end_pointer = i;
 
                     const tmp_str_len = end_pointer - start_pointer + 1 + libname16_.len + 1 + 1;
-                    var u16searchString: [:0]u16 = @ptrCast(try self.Allocator.alloc(u16, tmp_str_len));
+                    const u16searchString_alloc = try self.Allocator.alloc(u16, tmp_str_len);
+                    var u16searchString: [:0]u16 = @ptrCast(u16searchString_alloc);
                     //std.mem.copyForwards(u16, u8searchString[0 .. end_pointer - start_pointer], PATH[start_pointer..end_pointer]);
                     std.mem.copyForwards(u16, u16searchString[0 .. end_pointer - start_pointer], PATH[start_pointer..end_pointer]);
 
@@ -493,16 +535,23 @@ pub const DllLoader = struct {
                     if (err != 0) {
                         SetLastError(0);
                         start_pointer = end_pointer + 1;
-                        self.Allocator.free(@as([]u16, @ptrCast(u16searchString[0..tmp_str_len])));
+                        self.Allocator.free(u16searchString_alloc);
                         continue :cycle;
                     }
                     found = true;
-                    dllPath.path16 = @ptrCast(u16searchString[0 .. tmp_str_len - 2]);
-                    dllPath.shortPath16 = @constCast(libname16_);
+                    const copy_fullname16 = try self.Allocator.alloc(u16, tmp_str_len - 2);
+                    @memcpy(copy_fullname16, u16searchString[0 .. tmp_str_len - 2]);
+                    const copy_shortname16 = clr.getShortName(@ptrCast(copy_fullname16));
+
+                    self.Allocator.free(u16searchString_alloc);
+                    dllPath.path16 = @ptrCast(copy_fullname16);
+                    dllPath.shortPath16 = @ptrCast(copy_shortname16);
+                    dllPath.allocated_buf = copy_fullname16;
                     break :cycle;
                 }
             }
 
+            self.Allocator.free(PATH_s);
             if (!found) {
                 return null;
             }
@@ -514,7 +563,7 @@ pub const DllLoader = struct {
     pub fn LoadDllInMemory(self: *@This(), dllPath: *DllPath, dllSize: *usize) !?[*]u8 {
         // load DLL into memory
 
-        const kernel32_s = try lstring(self.Allocator, "KERNEL32.DLL");
+        const kernel32_s = try lstring(self.Allocator, "kernel32.dll");
         defer self.Allocator.free(kernel32_s);
         const kernel32 = self.LoadedDlls.get(kernel32_s).?.NameExports;
 
@@ -688,6 +737,7 @@ pub const DllLoader = struct {
         dll_struct: *Dll,
     ) !void {
         log.setContext(logtags.ImpRes);
+
         // resolve import address table
         if (nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress > 0) {
             log.info(" Resolving imports\n", .{});
@@ -708,39 +758,38 @@ pub const DllLoader = struct {
                             if (!(library_name[library_name16_len] != 0 and library_name16_len < 260)) break library_name16_len;
                         } else 260) + 1,
                     ));
+                    // defer self.Allocator.free(library_name16);
                     library_name16_len += 2;
                     //print("Current lib to load: {s} size in u8 {d} in u16 {d}\n", .{ library_name, (library_name16_len - 2) / 2, library_name16_len });
-
-                    //Do not defer because the name is later used
-                    //defer self.Allocator.free(library_name16);
 
                     clr.u8tou16(library_name, library_name16.ptr, library_name16_len);
                     var library_nameHm: std.StringHashMap(*void) = undefined;
                     var library_ordinalHm: std.AutoHashMap(u16, *void) = undefined;
                     const apiHostName = apiset.ApiSetResolve(library_name16);
                     var libraryNameToLoad16: [:0]u16 = undefined;
+
+                    var zeroTerminatedLibraryNameToLoad16: ?[]u16 = null;
+
                     if (apiHostName) |apiHostNameResolved| {
-                        const zeroTerminatedLibraryNameToLoad16 = try self.Allocator.alloc(u16, apiHostNameResolved.len + 1);
-                        @memcpy(zeroTerminatedLibraryNameToLoad16[0..apiHostNameResolved.len], apiHostNameResolved[0..apiHostNameResolved.len]);
-                        zeroTerminatedLibraryNameToLoad16[apiHostNameResolved.len] = 0;
+                        zeroTerminatedLibraryNameToLoad16 = try self.Allocator.alloc(u16, apiHostNameResolved.len + 1);
+                        @memcpy(zeroTerminatedLibraryNameToLoad16.?[0..apiHostNameResolved.len], apiHostNameResolved[0..apiHostNameResolved.len]);
+                        zeroTerminatedLibraryNameToLoad16.?[apiHostNameResolved.len] = 0;
                         libraryNameToLoad16 = @ptrCast(zeroTerminatedLibraryNameToLoad16);
                         log.info16("Found apiset to load: ", .{}, library_name16);
                         log.info16("apiHost found: ", .{}, libraryNameToLoad16);
                     } else {
                         libraryNameToLoad16 = @ptrCast(library_name16[0 .. library_name16_len - 1]);
                     }
-                    var library: ?*Dll = null;
+                    var library: ?*Dll = undefined;
                     var loading_from_itself: bool = false;
-                    if (!self.LoadedDlls.contains(libraryNameToLoad16)) {
-                        log.info16("reflective loading library: ", .{}, libraryNameToLoad16);
-                        if (std.mem.eql(u16, dllPath.shortPath16, libraryNameToLoad16)) {
-                            library = dll_struct;
-                            loading_from_itself = true;
-                        } else {
-                            library = try self.ZLoadLibrary(libraryNameToLoad16);
-                        }
+                    if (std.mem.eql(u16, dllPath.shortPath16, libraryNameToLoad16)) {
+                        library = dll_struct;
+                        loading_from_itself = true;
                     } else {
-                        library = self.LoadedDlls.get(libraryNameToLoad16).?;
+                        library = try self.ZLoadLibrary(libraryNameToLoad16);
+                    }
+                    if (zeroTerminatedLibraryNameToLoad16 != null) {
+                        // self.Allocator.free(zeroTerminatedLibraryNameToLoad16.?);
                     }
                     library_nameHm = library.?.NameExports;
                     library_ordinalHm = library.?.OrdinalExports;
@@ -783,7 +832,7 @@ pub const DllLoader = struct {
         log.setContext(logtags.RefLoad);
         defer log.rollbackContext();
 
-        const kernel32_s = try lstring(self.Allocator, "KERNEL32.DLL");
+        const kernel32_s = try lstring(self.Allocator, "kernel32.dll");
         defer self.Allocator.free(kernel32_s);
         const kernel32_m = self.LoadedDlls.get(kernel32_s).?;
         const kernel32 = kernel32_m.NameExports;
@@ -793,34 +842,29 @@ pub const DllLoader = struct {
         const ntdll_m = self.LoadedDlls.get(ntdll_s).?;
         const ntdll = ntdll_m.NameExports;
 
-        const smallKernel32_s = try lstring(self.Allocator, "kernel32.dll");
-
-        if (std.mem.eql(u16, libname16_, smallKernel32_s)) {
-            return kernel32_m;
-        }
-        const mediumKernel32_s = try lstring(self.Allocator, "KERNEL32.dll");
-
-        if (std.mem.eql(u16, libname16_, mediumKernel32_s)) {
-            return kernel32_m;
-        }
-
-        const smallNtdll_s = try lstring(self.Allocator, "C:\\WINDOWS\\SYSTEM32\\NTDLL.DLL");
-        if (std.mem.eql(u16, libname16_, smallNtdll_s)) {
-            return ntdll_m;
-        }
         //const ntdll_ord = self.LoadedDlls.get(ntdll_s).?.OrdinalExports;
 
         const GetLastError: *const fn () callconv(.C) c_int = @ptrCast(kernel32.get("GetLastError"));
 
         // Resolve full dll path and short path
-        const dllPath = (try self.getDllPaths(libname16_)) orelse {
+        var dllPath = (try self.getDllPaths(libname16_)) orelse {
             log.crit("Failed to resolve dllPath\n", .{});
             return null;
         };
 
+        dllPath.normalize();
+
         log.info16("Starting to load valid dll", .{}, dllPath.shortPath16);
         log.info16("Full path is", .{}, dllPath.path16);
 
+        if (self.LoadedDlls.contains(dllPath.shortPath16)) {
+            log.info("Dll already loaded\n", .{});
+            // TODO does not work for now, use after free occurs??
+            // dllPath.free(self.Allocator);
+            return self.LoadedDlls.get(dllPath.shortPath16);
+        }
+
+        //static lifetime
         var dll_struct: *Dll = try self.Allocator.create(Dll);
         dll_struct.Path = dllPath;
 

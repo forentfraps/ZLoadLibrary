@@ -56,21 +56,25 @@ pub fn main() !void {
         if (it.next()) |key| {
             const dll_entry = DllLoader.LoadedDlls.get(key.*).?;
 
-            const dllPath: *dll.DllPath = try newallocator.create(dll.DllPath);
+            var dllPath: *dll.DllPath = try newallocator.create(dll.DllPath);
 
             const newpathShort: [:0]u16 = @ptrCast((try newallocator.alloc(u16, dll_entry.Path.shortPath16.len)));
             std.mem.copyForwards(u16, newpathShort, dll_entry.Path.shortPath16);
             const newpath: [:0]u16 = @ptrCast((try newallocator.alloc(u16, dll_entry.Path.path16.len)));
             std.mem.copyForwards(u16, newpath, dll_entry.Path.path16);
-            dllPath.shortPath16 = newpathShort;
+            dllPath.shortPath16 = clr.getShortName(newpath);
             dllPath.path16 = newpath;
+            dllPath.normalize();
 
             var newdll = try newallocator.create(dll.Dll);
             newdll.NameExports = try dll_entry.NameExports.cloneWithAllocator(newallocator);
             newdll.OrdinalExports = try dll_entry.OrdinalExports.cloneWithAllocator(newallocator);
             newdll.Path = dllPath;
             newdll.BaseAddr = dll_entry.BaseAddr;
-            try newLoadedDlls.put(key.*, newdll);
+            clr.print16(dllPath.shortPath16);
+            std.debug.print("\n", .{});
+
+            try newLoadedDlls.put(dllPath.shortPath16, newdll);
         } else {
             break;
         }
@@ -79,9 +83,10 @@ pub fn main() !void {
     DllLoader.Allocator = newallocator;
     DllLoader.HeapAllocator = HeapAllocator;
     dll.GLOBAL_DLL_LOADER = &DllLoader;
-    kernel32_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "KERNEL32.DLL")).?;
-    kernelbase_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "KERNELBASE.dll")).?;
+    kernel32_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "kernel32.dll")).?;
+    kernelbase_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "kernelbase.dll")).?;
     ntdll_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "ntdll.dll")).?;
+
     kernel32 = kernel32_m.NameExports;
     ntdll = ntdll_m.NameExports;
 
