@@ -35,7 +35,7 @@ pub fn main() !void {
         try DllLoader.getLoadedDlls();
         //try DllLoader.switchAllocator();
 
-        std.debug.print("space used: {d}% leaving scope\n", .{100 * fba.end_index / (1024000)});
+        std.debug.print("space used: {d}% leaving scope\n", .{100 * fba.end_index / (4096000)});
     }
     var kernel32_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "KERNEL32.DLL")).?;
     var kernelbase_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "KERNELBASE.dll")).?;
@@ -99,30 +99,30 @@ pub fn main() !void {
     //
     // _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(msvcrt_s)));
 
-    // const ws2_32_s = try lstring(DllLoader.Allocator, "Ws2_32.dll");
+    // const ws2_32_s = try lstring(DllLoader.Allocator, "ws2_32.dll");
     // _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(ws2_32_s)));
-    //
+    // //
     // const ws2_32 = DllLoader.LoadedDlls.get(ws2_32_s).?.NameExports;
     // const WSAStartup: *const fn (winc.WORD, *winc.WSADATA) c_int = @ptrCast(ws2_32.get("WSAStartup") orelse return dll.DllError.FuncResolutionFailed);
     // var wsaData: winc.WSADATA = undefined;
     // std.debug.print("WSAStartup value: {d}\n", .{WSAStartup(winc.MAKEWORD(2, 2), &wsaData)});
     //
-    // const wininet_s = try lstring(DllLoader.Allocator, "wininet.dll");
+    // const wininet_s = try lstring(DllLoader.Allocator, "winhttp.dll");
     // _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(wininet_s)));
 
-    // const ucrtbase_s = try lstring(DllLoader.Allocator, "ucrtbase.dll");
-    // _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(ucrtbase_s)));
+    const ucrtbase_s = try lstring(DllLoader.Allocator, "ucrtbase.dll");
+    _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(ucrtbase_s)));
     //
-    const gdi32full_s = try lstring(DllLoader.Allocator, "gdi32full.dll");
-    _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(gdi32full_s)));
+    // const gdi32full_s = try lstring(DllLoader.Allocator, "gdi32full.dll");
+    // _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(gdi32full_s)));
     //
-    const user32_s = try lstring(DllLoader.Allocator, "USER32.dll");
-    _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(user32_s)));
-    std.debug.print("user32 looaded!\n", .{});
-    const user32 = DllLoader.LoadedDlls.get(user32_s).?.NameExports;
-
-    const MessageBoxW: *const fn (?*void, [*]const u16, [*]const u16, u64) c_int = @ptrCast(user32.get("MessageBoxW") orelse return dll.DllError.FuncResolutionFailed);
-    _ = MessageBoxW(null, (try clr.lstring(DllLoader.Allocator, "Text")).ptr, (try clr.lstring(DllLoader.Allocator, "Text2")).ptr, 0);
+    // const user32_s = try lstring(DllLoader.Allocator, "user32.dll");
+    // _ = try DllLoader.ZLoadLibrary(@as([:0]const u16, @ptrCast(user32_s)));
+    // std.debug.print("user32 looaded!\n", .{});
+    // const user32 = DllLoader.LoadedDlls.get(user32_s).?.NameExports;
+    //
+    // const MessageBoxW: *const fn (?*void, [*]const u16, [*]const u16, u64) c_int = @ptrCast(user32.get("MessageBoxW") orelse return dll.DllError.FuncResolutionFailed);
+    // _ = MessageBoxW(null, (try clr.lstring(DllLoader.Allocator, "Text")).ptr, (try clr.lstring(DllLoader.Allocator, "Text2")).ptr, 0);
 
     std.debug.print("Scope left fin!\n", .{});
 }
