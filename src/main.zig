@@ -42,7 +42,7 @@ pub fn main() !void {
     var ntdll_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "ntdll.dll")).?;
     var kernel32 = kernel32_m.NameExports;
     var ntdll = ntdll_m.NameExports;
-    const pHeapCreate = kernel32.get("HeapCreate") orelse return dll.DllError.FuncResolutionFailed;
+    const pHeapCreate = ntdll.get("RtlCreateHeap") orelse return dll.DllError.FuncResolutionFailed;
     const pHeapAlloc = ntdll.get("RtlAllocateHeap") orelse return dll.DllError.FuncResolutionFailed;
     const pHeapRealloc = ntdll.get("RtlReAllocateHeap") orelse return dll.DllError.FuncResolutionFailed;
     const pHeapFree = ntdll.get("RtlFreeHeap") orelse return dll.DllError.FuncResolutionFailed;
