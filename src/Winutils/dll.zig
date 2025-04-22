@@ -332,18 +332,22 @@ pub const DllLoader = struct {
             const entry: *LDR_DATA_TABLE_ENTRY = @ptrFromInt(@intFromPtr(curr) - 16);
 
             const BaseDllName: UNICODE_STRING = entry.BaseDllName;
+            // TODO what the fuck is this abomination
 
             if (BaseDllName.Buffer != null and (BaseDllName.Length / 2) <= 260 and skipcount <= 0) {
                 var dll: *Dll = @ptrCast(@alignCast(try self.Allocator.create(Dll)));
                 dll.BaseAddr = @ptrCast(entry.DllBase);
                 const dllName: [*:0]u16 = @ptrCast((try self.Allocator.alloc(u16, entry.fullDllName.Length / 2 + 1)).ptr);
+                const shortdllName: [*:0]u16 = @ptrCast((try self.Allocator.alloc(u16, entry.BaseDllName.Length / 2 + 1)).ptr);
                 std.mem.copyForwards(u16, dllName[0 .. entry.fullDllName.Length / 2 + 1], entry.fullDllName.Buffer.?[0..(entry.fullDllName.Length / 2 + 1)]);
+                std.mem.copyForwards(u16, shortdllName[0 .. entry.BaseDllName.Length / 2 + 1], entry.BaseDllName.Buffer.?[0..(entry.BaseDllName.Length / 2 + 1)]);
                 dll.Path = try self.Allocator.create(DllPath);
 
-                dll.Path.shortPath16 = @ptrCast(dllName[0 .. entry.fullDllName.Length / 2 + 1]);
+                dll.Path.shortPath16 = @ptrCast(shortdllName[0 .. entry.BaseDllName.Length / 2 + 1]);
                 dll.Path.path16 = @ptrCast(dllName[0 .. entry.fullDllName.Length / 2 + 1]);
+                dll.Path.normalize();
                 try self.ResolveExports(dll);
-                try self.LoadedDlls.put(BaseDllName.Buffer.?[0..(entry.BaseDllName.Length / 2 + 1)], dll);
+                try self.LoadedDlls.put(dll.Path.shortPath16, dll);
                 //print16(BaseDllName.Buffer.?[0..(entry.BaseDllName.Length / 2 + 1)].ptr);
                 if (curr == head) {
                     break;
@@ -779,6 +783,7 @@ pub const DllLoader = struct {
                         zeroTerminatedLibraryNameToLoad16.?[apiHostNameResolved.len] = 0;
                         libraryNameToLoad16 = @ptrCast(zeroTerminatedLibraryNameToLoad16);
                         log.info16("Found apiset to load: ", .{}, library_name16);
+
                         log.info16("apiHost found: ", .{}, libraryNameToLoad16);
                     } else {
                         libraryNameToLoad16 = @ptrCast(library_name16[0 .. library_name16_len - 1]);
@@ -788,6 +793,7 @@ pub const DllLoader = struct {
                     if (std.mem.eql(u16, dllPath.shortPath16, libraryNameToLoad16)) {
                         library = dll_struct;
                         loading_from_itself = true;
+                        continue;
                     } else {
                         library = try self.ZLoadLibrary(libraryNameToLoad16);
                     }
@@ -824,7 +830,8 @@ pub const DllLoader = struct {
             }
         }
 
-        if (nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].Size > 0) {
+        // TODO disabled for now
+        if (nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].Size > 0 and false) {
             log.info(" Resolving delayed imports\n", .{});
             var delay_import_descriptor: [*]const IMAGE_DELAYLOAD_DESCRIPTOR =
                 @ptrCast(@alignCast(dll_base[nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT].VirtualAddress..]));
@@ -857,6 +864,13 @@ pub const DllLoader = struct {
                     var libraryNameToLoad16: [:0]u16 = undefined;
 
                     if (apiHostName) |apiHostNameResolved| {
+                        if (apiHostNameResolved.len == 0) {
+                            continue;
+                        }
+                        for (apiHostNameResolved) |wch| {
+                            std.debug.print("{x} ", .{wch});
+                        }
+                        std.debug.print(" <- letters of apihostname \n", .{});
                         var zeroTerminatedLibraryNameToLoad16 = try self.Allocator.alloc(u16, apiHostNameResolved.len + 1);
                         defer self.Allocator.free(zeroTerminatedLibraryNameToLoad16);
                         @memcpy(zeroTerminatedLibraryNameToLoad16[0..apiHostNameResolved.len], apiHostNameResolved[0..apiHostNameResolved.len]);
@@ -907,10 +921,54 @@ pub const DllLoader = struct {
         log.rollbackContext();
     }
 
-    pub fn addDllToPEBList(self: *@This(), dll: *Dll) void {
-        if (dll != null and self != null) {
-            return;
+    pub fn addDllToPEBList(self: *@This(), dll: *Dll) !void {
+        //const heap = win.kernel32.GetProcessHeap().?;
+
+        const peb: *PEB = asm volatile ("mov %gs:0x60, %rax"
+            : [peb] "={rax}" (-> *PEB),
+            :
+            : "memory"
+        );
+        const ldr = peb.Ldr;
+        const head: *winc.LIST_ENTRY = @ptrFromInt(ldr.InMemoryOrderModuleList[0]);
+        var curr: *winc.LIST_ENTRY = head.Flink;
+        var count: usize = 0;
+        var skipcount: i32 = 2;
+        //At this point the allocator should be fixed buffer or something similar, disconnected from WINapi
+        self.LoadedDlls = u16HashMapType.init(self.Allocator);
+        //Skipping ListHead and .exe selfmodule
+        while (count < 1000) : ({
+            curr = curr.Flink;
+            count += 1;
+        }) {
+            const entry: *LDR_DATA_TABLE_ENTRY = @ptrFromInt(@intFromPtr(curr) - 16);
+
+            const BaseDllName: UNICODE_STRING = entry.BaseDllName;
+            // TODO what the fuck is this abomination
+
+            if (BaseDllName.Buffer != null and (BaseDllName.Length / 2) <= 260 and skipcount <= 0) {
+                var dll: *Dll = @ptrCast(@alignCast(try self.Allocator.create(Dll)));
+                dll.BaseAddr = @ptrCast(entry.DllBase);
+                const dllName: [*:0]u16 = @ptrCast((try self.Allocator.alloc(u16, entry.fullDllName.Length / 2 + 1)).ptr);
+                const shortdllName: [*:0]u16 = @ptrCast((try self.Allocator.alloc(u16, entry.BaseDllName.Length / 2 + 1)).ptr);
+                std.mem.copyForwards(u16, dllName[0 .. entry.fullDllName.Length / 2 + 1], entry.fullDllName.Buffer.?[0..(entry.fullDllName.Length / 2 + 1)]);
+                std.mem.copyForwards(u16, shortdllName[0 .. entry.BaseDllName.Length / 2 + 1], entry.BaseDllName.Buffer.?[0..(entry.BaseDllName.Length / 2 + 1)]);
+                dll.Path = try self.Allocator.create(DllPath);
+
+                dll.Path.shortPath16 = @ptrCast(shortdllName[0 .. entry.BaseDllName.Length / 2 + 1]);
+                dll.Path.path16 = @ptrCast(dllName[0 .. entry.fullDllName.Length / 2 + 1]);
+                dll.Path.normalize();
+                try self.ResolveExports(dll);
+                try self.LoadedDlls.put(dll.Path.shortPath16, dll);
+                //print16(BaseDllName.Buffer.?[0..(entry.BaseDllName.Length / 2 + 1)].ptr);
+                if (curr == head) {
+                    break;
+                }
+            } else {
+                skipcount -= 1;
+            }
         }
+        return;
     }
 
     pub fn IMAGE_FIRST_SECTION(nt_headers: *const winc.IMAGE_NT_HEADERS) [*]const winc.IMAGE_SECTION_HEADER {
@@ -999,6 +1057,10 @@ pub const DllLoader = struct {
         defer log.rollbackContext();
 
         const kernel32_s = try lstring(self.Allocator, "kernel32.dll");
+        var it = self.LoadedDlls.keyIterator();
+        while (it.next()) |key| {
+            log.info16("dll loaded name: ", .{}, key.*);
+        }
         defer self.Allocator.free(kernel32_s);
         const kernel32_m = self.LoadedDlls.get(kernel32_s).?;
         const kernel32 = kernel32_m.NameExports;
