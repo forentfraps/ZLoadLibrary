@@ -974,7 +974,6 @@ pub const DllLoader = struct {
     pub fn IMAGE_FIRST_SECTION(nt_headers: *const winc.IMAGE_NT_HEADERS) [*]const winc.IMAGE_SECTION_HEADER {
         const OptionalHeader: [*]const u8 = @ptrCast(&nt_headers.OptionalHeader);
         const SizeOfOptionalHeader: usize = nt_headers.FileHeader.SizeOfOptionalHeader;
-
         const sectionHeader: [*]const winc.IMAGE_SECTION_HEADER = @alignCast(@ptrCast(OptionalHeader[SizeOfOptionalHeader..]));
         return sectionHeader;
     }
@@ -1026,13 +1025,32 @@ pub const DllLoader = struct {
                 }
             }
         }
+        // Here should be the execution of TLS callbacks
+        //
         log.info("fetching ntflush\n", .{});
         // I dont really know why is this being done, however it is advised to do so
         // after adding rx\rwx memory to a process
         // there are opinions that it matters only on some non x86 cpus
+        //
+        // Well conceptually i know, but in reality I have not observed it making a difference
+        //
         const NtFlush: *const fn (i32, ?[*]u8, usize) c_int = @ptrCast(ntdll.get("NtFlushInstructionCache").?);
         const flush_res = NtFlush(-1, null, 0);
         log.info("Flush result: {}\n", .{flush_res == 0});
+
+        if (nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_TLS].Size != 0) {
+            const tls_dir: *const winc.IMAGE_TLS_DIRECTORY = @alignCast(@ptrCast(dll.BaseAddr[nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress..]));
+            var tls_callback: ?*const DLLEntry = @ptrFromInt(tls_dir.AddressOfCallBacks);
+            const dll_base_hinstance: win.HINSTANCE = @ptrCast(dll.BaseAddr);
+            while (true) {
+                if (tls_callback) |tls_runnable| {
+                    _ = tls_runnable(dll_base_hinstance, winc.DLL_PROCESS_ATTACH, null);
+                } else {
+                    break;
+                }
+                tls_callback = @ptrFromInt(@intFromPtr(tls_callback) + @sizeOf(tls_callback));
+            }
+        }
 
         if (nt_headers.OptionalHeader.AddressOfEntryPoint != 0) {
             const dll_entry: ?*const DLLEntry = @ptrCast(dll.BaseAddr[nt_headers.OptionalHeader.AddressOfEntryPoint..]);

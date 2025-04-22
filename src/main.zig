@@ -24,12 +24,29 @@ var log = logger.Logger.init(colour_list.len, pref_list, colour_list);
 pub fn main() !void {
     std.debug.print("Starting to ref load dll\n", .{});
 
+<<<<<<< HEAD
     var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
     var DllLoader = dll.DllLoader.init(allocator);
     //try dll.ZLoadLibrary(try lstring(sa, "C:\\Windows\\System32\\user32.dll"));
     try DllLoader.getLoadedDlls();
 
+=======
+        std.debug.print("space used: {d}% leaving scope\n", .{100 * fba.end_index / (4096000)});
+    }
+    var kernel32_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "KERNEL32.DLL")).?;
+    var kernelbase_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "KERNELBASE.dll")).?;
+    var ntdll_m = DllLoader.LoadedDlls.get(try lstring(DllLoader.Allocator, "ntdll.dll")).?;
+    var kernel32 = kernel32_m.NameExports;
+    var ntdll = ntdll_m.NameExports;
+    const pHeapCreate = ntdll.get("RtlCreateHeap") orelse return dll.DllError.FuncResolutionFailed;
+    const pHeapAlloc = ntdll.get("RtlAllocateHeap") orelse return dll.DllError.FuncResolutionFailed;
+    const pHeapRealloc = ntdll.get("RtlReAllocateHeap") orelse return dll.DllError.FuncResolutionFailed;
+    const pHeapFree = ntdll.get("RtlFreeHeap") orelse return dll.DllError.FuncResolutionFailed;
+    const pHeapDestroy = ntdll.get("RtlDestroyHeap") orelse return dll.DllError.FuncResolutionFailed;
+    var HeapAllocator = sneaky_memory.HeapAllocator.init(pHeapCreate, pHeapAlloc, pHeapRealloc, pHeapFree, pHeapDestroy);
+    const newallocator = HeapAllocator.allocator();
+>>>>>>> c510450c1963d417f849d22000ac22802073f29d
     var it = DllLoader.LoadedDlls.keyIterator();
     while (it.next()) |key| {
         log.info16("dll loaded name: ", .{}, key.*);
