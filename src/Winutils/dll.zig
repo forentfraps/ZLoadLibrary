@@ -923,6 +923,9 @@ pub const DllLoader = struct {
 
     pub fn addDllToPEBList(self: *@This(), dll: *Dll) !void {
         //const heap = win.kernel32.GetProcessHeap().?;
+        // UNFINISHED - TODO finish
+
+        _ = dll;
 
         const peb: *PEB = asm volatile ("mov %gs:0x60, %rax"
             : [peb] "={rax}" (-> *PEB),
@@ -947,19 +950,19 @@ pub const DllLoader = struct {
             // TODO what the fuck is this abomination
 
             if (BaseDllName.Buffer != null and (BaseDllName.Length / 2) <= 260 and skipcount <= 0) {
-                var dll: *Dll = @ptrCast(@alignCast(try self.Allocator.create(Dll)));
-                dll.BaseAddr = @ptrCast(entry.DllBase);
+                var current_dll: *Dll = @ptrCast(@alignCast(try self.Allocator.create(Dll)));
+                current_dll.BaseAddr = @ptrCast(entry.DllBase);
                 const dllName: [*:0]u16 = @ptrCast((try self.Allocator.alloc(u16, entry.fullDllName.Length / 2 + 1)).ptr);
                 const shortdllName: [*:0]u16 = @ptrCast((try self.Allocator.alloc(u16, entry.BaseDllName.Length / 2 + 1)).ptr);
                 std.mem.copyForwards(u16, dllName[0 .. entry.fullDllName.Length / 2 + 1], entry.fullDllName.Buffer.?[0..(entry.fullDllName.Length / 2 + 1)]);
                 std.mem.copyForwards(u16, shortdllName[0 .. entry.BaseDllName.Length / 2 + 1], entry.BaseDllName.Buffer.?[0..(entry.BaseDllName.Length / 2 + 1)]);
-                dll.Path = try self.Allocator.create(DllPath);
+                current_dll.Path = try self.Allocator.create(DllPath);
 
-                dll.Path.shortPath16 = @ptrCast(shortdllName[0 .. entry.BaseDllName.Length / 2 + 1]);
-                dll.Path.path16 = @ptrCast(dllName[0 .. entry.fullDllName.Length / 2 + 1]);
-                dll.Path.normalize();
-                try self.ResolveExports(dll);
-                try self.LoadedDlls.put(dll.Path.shortPath16, dll);
+                current_dll.Path.shortPath16 = @ptrCast(shortdllName[0 .. entry.BaseDllName.Length / 2 + 1]);
+                current_dll.Path.path16 = @ptrCast(dllName[0 .. entry.fullDllName.Length / 2 + 1]);
+                current_dll.Path.normalize();
+                try self.ResolveExports(current_dll);
+                try self.LoadedDlls.put(current_dll.Path.shortPath16, current_dll);
                 //print16(BaseDllName.Buffer.?[0..(entry.BaseDllName.Length / 2 + 1)].ptr);
                 if (curr == head) {
                     break;
