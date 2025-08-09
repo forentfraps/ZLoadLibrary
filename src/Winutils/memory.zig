@@ -23,11 +23,11 @@ pub const HeapAllocator = switch (builtin.os.tag) {
         const HeapHandle = windows.HANDLE;
 
         pub fn init(
-            HeapCreate: *void,
-            HeapAlloc: *void,
-            HeapRealloc: *void,
-            HeapFree: *void,
-            HeapDestroy: *void,
+            HeapCreate: *anyopaque,
+            HeapAlloc: *anyopaque,
+            HeapRealloc: *anyopaque,
+            HeapFree: *anyopaque,
+            HeapDestroy: *anyopaque,
         ) HeapAllocator {
             return HeapAllocator{
                 .heap_handle = null,

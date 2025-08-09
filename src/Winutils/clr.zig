@@ -15,14 +15,14 @@ pub fn u16tou8(utf16: [*:0]const u16, utf8: [*:0]u8, len: usize) void {
     utf8[len - 1] = 0;
 }
 
-pub fn lstring(allocator: std.mem.Allocator, utf8: anytype) ![]u16 {
-    var utf16: [*]u16 = (try allocator.alloc(u16, utf8.len + 1)).ptr;
-    for (utf8, 0..) |char, i| {
-        utf16[i] = @intCast(char);
-    }
-    utf16[utf8.len] = 0;
-    return utf16[0 .. utf8.len + 1];
-}
+// pub fn lstring(allocator: std.mem.Allocator, utf8: anytype) ![]u16 {
+//     var utf16: [*]u16 = (try allocator.alloc(u16, utf8.len + 1)).ptr;
+//     for (utf8, 0..) |char, i| {
+//         utf16[i] = @intCast(char);
+//     }
+//     utf16[utf8.len] = 0;
+//     return utf16[0 .. utf8.len + 1];
+// }
 
 pub fn slicestr(utf8: anytype) []u8 {
     return utf8[0 .. utf8.len + 1];
