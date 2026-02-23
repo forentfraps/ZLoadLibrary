@@ -1,34 +1,22 @@
 const std = @import("std");
 const dll = @import("Winutils/dll.zig");
 const clr = @import("Winutils/clr.zig");
-const logger = @import("Logger/logger.zig");
+const logger = @import("sys_logger");
 
+const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const win = std.os.windows;
 
 const pref_list = [_][]const u8{"MAIN"};
-const colour = logger.LoggerColour;
+const colour = logger.SysLoggerColour;
 const colour_list = [_]colour{colour.green};
-var log = logger.Logger.init(colour_list.len, pref_list, colour_list);
 
 // Uppercase lookup helper to match NameExports keys
-fn asciiUpper(b: u8) u8 {
-    return if (b >= 'a' and b <= 'z') b - 32 else b;
-}
-fn toUpperTemp(buf: []u8, s: []const u8) []u8 {
-    const n = @min(buf.len, s.len);
-    var i: usize = 0;
-    while (i < n) : (i += 1) buf[i] = asciiUpper(s[i]);
-    return buf[0..n];
-}
-fn getProc(comptime T: type, map: std.StringHashMap(*anyopaque), name: []const u8) !*const T {
-    var tmp: [128]u8 = undefined;
-    const up = toUpperTemp(&tmp, name);
-    const p = map.get(up) orelse return dll.DllError.FuncResolutionFailed;
-    return @ptrCast(p);
-}
 
 pub fn main() !void {
-    std.debug.print("Starting reflective load test...\n", .{});
+    var log = logger.SysLogger.init(colour_list.len, pref_list, colour_list);
+    // log.enabled = false;
+    // _ = win.kernel32.LoadLibraryW(W("win32u.dll"));
+    // std.debug.print("Starting reflective load test...\n", .{});
 
     // Debug allocator makes it easy to catch leaks / double frees while iterating
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -36,6 +24,11 @@ pub fn main() !void {
 
     var loader = dll.DllLoader.init(allocator);
     try loader.getLoadedDlls();
+
+    var it = loader.LoadedDlls.iterator();
+    while (it.next()) |key| {
+        log.info16("Loaded dll {d}: ", .{key.key_ptr.*.len}, key.key_ptr.*);
+    }
 
     // Optional: patch exports for kernelbase/kernel32 if you still rely on the stubs
     const kb = try loader.getDllByName("kernelbase.dll");
@@ -47,25 +40,25 @@ pub fn main() !void {
     dll.GLOBAL_DLL_LOADER = &loader;
 
     // Load user32.dll reflectively
-    const user32_name16 = try dll.z16FromUtf8(allocator, "user32.dll");
-    log.info16("user32 name16 ", .{}, user32_name16);
-    defer allocator.free(user32_name16);
-    const user32 = (try loader.ZLoadLibrary(@as([:0]const u16, @ptrCast(user32_name16)))) orelse @panic("Failed to load");
-    std.debug.print("user32 loaded!\n", .{});
+    var user32_name16 = try dll.OwnedZ16.fromU8(allocator, "user32.dll");
+    defer user32_name16.deinit();
+    log.info16("user32 name16 ", .{}, user32_name16.raw);
+    const user32 = (try loader.ZLoadLibrary(user32_name16.view())) orelse @panic("Failed to load");
+    // std.debug.print("user32 loaded!\n", .{});
 
     // Grab MessageBoxW from the (uppercased-key) export map
     const MessageBoxW =
-        try getProc(fn (?*anyopaque, [*]const u16, [*]const u16, u32) callconv(.C) c_int, user32.NameExports, "MessageBoxW");
+        try user32.getProc(fn (?*anyopaque, [*]const u16, [*]const u16, u32) callconv(.winapi) c_int, "MessageBoxW");
 
-    const text = try dll.z16FromUtf8(allocator, "Hello from reflective loader!");
-    const title = try dll.z16FromUtf8(allocator, "It works 🎉");
+    var text = try dll.OwnedZ16.fromU8(allocator, "Hello from reflective loader!");
+    var title = try dll.OwnedZ16.fromU8(allocator, "It works !!");
     defer {
-        allocator.free(text);
-        allocator.free(title);
+        text.deinit();
+        title.deinit();
     }
 
     // HWND null, OK button
-    _ = MessageBoxW(null, text.ptr, title.ptr, 0);
+    _ = MessageBoxW(null, text.raw.ptr, title.raw.ptr, 0);
 
     std.debug.print("Done.\n", .{});
 }

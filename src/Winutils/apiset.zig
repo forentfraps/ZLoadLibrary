@@ -2,8 +2,10 @@ const std = @import("std");
 const win = @import("std").os.windows;
 const clr = @import("clr.zig");
 const sneaky_memory = @import("memory.zig");
-const logger = @import("../Logger/logger.zig");
 const winc = @import("Windows.h.zig");
+const dll = @import("dll.zig");
+const SysLogger = @import("sys_logger").SysLogger;
+var log: SysLogger = undefined;
 const print = std.debug.print;
 
 // --- your structs kept as-is ---
@@ -66,7 +68,6 @@ fn lastHyphenIndex(s: []const u16) ?usize {
     return last;
 }
 
-// FIX: return full length if there’s no hyphen
 pub fn hyphenLen(string: []u16) usize {
     return lastHyphenIndex(string) orelse string.len;
 }
@@ -78,12 +79,12 @@ fn isDigits16(s: []const u16) bool {
 }
 
 // Build “rev->-0” candidate (no alloc; returns slice into stack buf)
-fn makeRevZeroCandidate(base: []const u16, out: []u16) []const u16 {
+fn makeRevNumCandidate(base: []const u16, out: []u16, num: u8) []const u16 {
     if (lastHyphenIndex(base)) |idx| {
         const tail = if (idx + 1 <= base.len) base[idx + 1 ..] else &[_]u16{};
         if (isDigits16(tail) and idx + 2 <= out.len) {
             @memcpy(out[0 .. idx + 1], base[0 .. idx + 1]);
-            out[idx + 1] = '0';
+            out[idx + 1] = num;
             return out[0 .. idx + 2];
         }
     }
@@ -116,11 +117,11 @@ fn slice16At(base: *const anyopaque, byte_off: u32, byte_len: u32) []const u16 {
 }
 
 // -------------- quick prefix check (yours, but safer) --------------
-pub fn checkApiSet(dllname: []u16) bool {
-    if (dllname.len < 11) return false; // "api-ms-win-" length
-    // Case-insensitive check for "API-MS-WIN-" or "EXT-MS-WIN-"
-    const p1 = "API-MS-WIN-"[0..];
-    const p2 = "EXT-MS-WIN-"[0..];
+pub fn checkApiSet(dllname: []const u16) bool {
+    if (dllname.len < 11) return false; //
+    // Case-insensitive check for "API-" or "EXT-"
+    const p1 = "API-"[0..];
+    const p2 = "EXT-"[0..];
 
     if (dllname.len >= p1.len) {
         var ok = true;
@@ -143,7 +144,8 @@ pub fn checkApiSet(dllname: []u16) bool {
 
 // ---------------- adapted resolver (minimal change) ----------------
 
-pub fn ApiSetResolve(apiset_name_in: []u16) ?[]u16 {
+pub fn ApiSetResolve(apiset_name_in: []const u16) ?[]u16 {
+    log = dll.log;
     if (!checkApiSet(apiset_name_in)) return null;
 
     // PEB->ApiSetMap (x64)
@@ -156,72 +158,111 @@ pub fn ApiSetResolve(apiset_name_in: []u16) ?[]u16 {
         : "memory"
     );
 
-    if (ApiSetMap.version < 6 or ApiSetMap.count == 0)
+    if (ApiSetMap.version < 6 or ApiSetMap.count == 0) {
+        log.crit16("BAD API VERSION OR NO MAPS", .{}, apiset_name_in);
         return null;
-
-    // Arrays
-    const hashEntryArray: [*]const ApiSetHashEntry =
-        @ptrFromInt(@intFromPtr(ApiSetMap) + ApiSetMap.offsetArrayHashEntries);
-    const nsEntryArray: [*]const ApiSetNamespaceEntry =
-        @ptrFromInt(@intFromPtr(ApiSetMap) + ApiSetMap.offsetArrayNamespaceEntries);
-
-    // Normalize input: strip ".dll"
-    const base = stripDllExt(apiset_name_in);
-
-    // Build candidates
-    var rev0_buf: [260]u16 = undefined;
-    const cand_exact = base;
-    const cand_rev0 = makeRevZeroCandidate(base, &rev0_buf);
-    const cand_root = makeContractRoot(base);
-
-    const candidates = [_][]const u16{ cand_exact, cand_rev0, cand_root };
-
-    // Try each candidate: hash only up to its last hyphen (your scheme)
-    var foundEntry: ?*const ApiSetNamespaceEntry = null;
-
-    candidate_loop: for (candidates) |cand| {
-        if (cand.len == 0) continue;
-
-        const prefix_end = hyphenLen(@constCast(cand)); // FIX: now returns len if no '-'
-        const key = cand[0..prefix_end];
-
-        const target_hash = winHash(ApiSetMap.hashMultiplier, @constCast(key));
-
-        var low: usize = 0;
-        var high: usize = @intCast(ApiSetMap.count - 1); // FIX: count-1, not count
-
-        while (low <= high) {
-            const middle = (low + high) >> 1;
-            const he = hashEntryArray[middle];
-
-            if (target_hash < he.hash) {
-                if (middle == 0) break;
-                high = middle - 1;
-            } else if (target_hash > he.hash) {
-                low = middle + 1;
-            } else {
-                // Hash match → assume index into namespace array (as in your code)
-                foundEntry = &nsEntryArray[@as(usize, @intCast(he.index))];
-                break;
-            }
-        }
-
-        if (foundEntry != null) break :candidate_loop;
     }
 
-    const e = foundEntry orelse return null;
+    const base_ptr = @intFromPtr(ApiSetMap);
+    const count: usize = @intCast(ApiSetMap.count);
 
-    // host array
-    if (e.hostCount == 0) return null;
+    const hashEntryArray: [*]const ApiSetHashEntry =
+        @ptrFromInt(base_ptr + @as(usize, ApiSetMap.offsetArrayHashEntries));
+    const nsEntryArray: [*]const ApiSetNamespaceEntry =
+        @ptrFromInt(base_ptr + @as(usize, ApiSetMap.offsetArrayNamespaceEntries));
+
+    // --- helpers ---
+    const eqFold16 = struct {
+        fn eqFold16(a: []const u16, b: []const u16) bool {
+            if (a.len != b.len) return false;
+            var i: usize = 0;
+            while (i < a.len) : (i += 1) {
+                var ca = a[i];
+                var cb = b[i];
+                if (ca >= 'A' and ca <= 'Z') ca += 32;
+                if (cb >= 'A' and cb <= 'Z') cb += 32;
+                if (ca != cb) return false;
+            }
+            return true;
+        }
+    }.eqFold16;
+
+    const hashFold16 = struct {
+        fn hashFold16(mult: u32, s: []const u16) u32 {
+            var h: u32 = 0;
+            var i: usize = 0;
+            while (i < s.len) : (i += 1) {
+                var c = s[i];
+                if (c >= 'A' and c <= 'Z') c += 32; // lowercase fold
+                h = h *% mult + @as(u32, @intCast(c));
+            }
+            return h;
+        }
+    }.hashFold16;
+    // ---------------
+
+    // Normalize input: strip ".dll"
+    const full = stripDllExt(apiset_name_in);
+
+    // Key = prefix up to (but not including) the last hyphen
+    const key_end = hyphenLen(@constCast(full));
+    const key = full[0..key_end];
+
+    // Hash the **prefix** only (lowercased), per schema
+    const target_hash = hashFold16(ApiSetMap.hashMultiplier, key);
+
+    // lower_bound over sorted hash table
+    var lo: usize = 0;
+    var hi: usize = count;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const h = hashEntryArray[mid].hash;
+        if (h < target_hash) lo = mid + 1 else hi = mid;
+    }
+    if (lo == count or hashEntryArray[lo].hash != target_hash) {
+        log.crit16("Did not find an entry ", .{}, apiset_name_in);
+        return null;
+    }
+
+    // collision scan: verify prefix against namespace name’s own prefix
+    var found: ?*const ApiSetNamespaceEntry = null;
+    var idx = lo;
+    while (idx < count and hashEntryArray[idx].hash == target_hash) : (idx += 1) {
+        const he = hashEntryArray[idx];
+        const ns_index: usize = @intCast(he.index);
+        if (ns_index >= count) continue;
+
+        const e = &nsEntryArray[ns_index];
+
+        const name_ptr: [*]const u16 = @ptrFromInt(base_ptr + @as(usize, e.nameOffset));
+        const name_len: usize = @intCast(e.nameSize / 2);
+        const map_full = name_ptr[0..name_len];
+
+        // Compare **prefix up to last hyphen** on both sides
+        const map_key_end = hyphenLen(@constCast(map_full));
+        const map_key = map_full[0..map_key_end];
+
+        if (eqFold16(map_key, key)) {
+            found = e;
+            break;
+        }
+    }
+
+    const e = found orelse {
+        log.crit16("Did not find an entry ", .{}, apiset_name_in);
+        return null;
+    };
+
+    if (e.hostCount == 0) {
+        log.crit16("HOST COUNT 0", .{}, apiset_name_in);
+        return null;
+    }
 
     const valueEntriesArray: [*]const ApiSetValueEntry =
-        @ptrFromInt(@intFromPtr(ApiSetMap) + e.valueEntriesOffset);
+        @ptrFromInt(base_ptr + @as(usize, e.valueEntriesOffset));
 
-    // Pick first host (works for typical default host)
+    // Default host is first entry
     const v0 = valueEntriesArray[0];
-
-    // Return []u16 pointing into the ApiSet map
-    const dllName: [*]u16 =
-        @ptrFromInt(@intFromPtr(ApiSetMap) + v0.valueOffset);
-    return dllName[0..(v0.valueLength / 2)];
+    const dllName: [*]u16 = @ptrFromInt(base_ptr + @as(usize, v0.valueOffset));
+    return dllName[0..(@as(usize, v0.valueLength) / 2)];
 }

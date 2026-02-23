@@ -8,7 +8,8 @@
 
 #zig
 .zig-cache/
-.zig-out/
+zig-out/
+zig-pkg/
 
 
 # Prerequisites

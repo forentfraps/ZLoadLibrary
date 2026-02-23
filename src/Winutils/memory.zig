@@ -14,11 +14,11 @@ pub const HeapAllocator = switch (builtin.os.tag) {
     .windows => struct {
         heap_handle: ?HeapHandle,
 
-        HeapCreate: *const fn (u32, usize, usize) callconv(.C) ?*anyopaque,
-        HeapAlloc: *const fn (*anyopaque, u32, usize) callconv(.C) ?*anyopaque,
-        HeapReAlloc: *const fn (*anyopaque, u32, *anyopaque, usize) callconv(.C) ?*anyopaque,
-        HeapFree: *const fn (*anyopaque, u32, *anyopaque) callconv(.C) c_int,
-        HeapDestroy: *const fn (*anyopaque) callconv(.C) c_int,
+        HeapCreate: *const fn (u32, usize, usize) callconv(.winapi) ?*anyopaque,
+        HeapAlloc: *const fn (*anyopaque, u32, usize) callconv(.winapi) ?*anyopaque,
+        HeapReAlloc: *const fn (*anyopaque, u32, *anyopaque, usize) callconv(.winapi) ?*anyopaque,
+        HeapFree: *const fn (*anyopaque, u32, *anyopaque) callconv(.winapi) c_int,
+        HeapDestroy: *const fn (*anyopaque) callconv(.winapi) c_int,
 
         const HeapHandle = windows.HANDLE;
 
