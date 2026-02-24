@@ -1,5 +1,5 @@
 const std = @import("std");
-const win = std.os.windows;
+const win = @import("zigwin32").everything;
 
 pub fn u8tou16(utf8: [*:0]const u8, utf16: [*:0]u16, len: usize) void {
     for (0..len - 1) |i| {
@@ -95,4 +95,46 @@ pub fn findExportRealName(fname: [*]const u8) ?[]const u8 {
         if (c == '.') return fname[i + 1 .. len];
     }
     return null;
+}
+pub fn sectionCharacteristicsToPageProtection(chars: win.IMAGE_SECTION_CHARACTERISTICS) win.PAGE_PROTECTION_FLAGS {
+    const execute = chars.MEM_EXECUTE == 1;
+    const read = chars.MEM_READ == 1;
+    const write = chars.MEM_WRITE == 1;
+
+    var flags = win.PAGE_PROTECTION_FLAGS{};
+
+    // Map RWX combinations to the appropriate PAGE_* base protection
+    if (!execute and !read and !write) {
+        flags.PAGE_NOACCESS = 1;
+    } else if (!execute and read and !write) {
+        flags.PAGE_READONLY = 1;
+    } else if (!execute and read and write) {
+        flags.PAGE_READWRITE = 1;
+    } else if (!execute and !read and write) {
+        // Write-only has no direct equivalent; Windows doesn't support it,
+        // so fall back to READWRITE.
+        flags.PAGE_READWRITE = 1;
+    } else if (execute and !read and !write) {
+        flags.PAGE_EXECUTE = 1;
+    } else if (execute and read and !write) {
+        flags.PAGE_EXECUTE_READ = 1;
+    } else if (execute and read and write) {
+        flags.PAGE_EXECUTE_READWRITE = 1;
+    } else if (execute and !read and write) {
+        // Execute+Write without Read is unusual; promote to EXECUTE_READWRITE.
+        flags.PAGE_EXECUTE_READWRITE = 1;
+    }
+
+    // Map cache/paging modifiers
+    if (chars.MEM_NOT_CACHED == 1) {
+        flags.PAGE_NOCACHE = 1;
+    }
+
+    // MEM_DISCARDABLE doesn't have a direct PAGE_* equivalent but
+    // maps loosely to SEC_RESERVE semantics for mapped views.
+    if (chars.MEM_DISCARDABLE == 1) {
+        flags.SEC_RESERVE = 1;
+    }
+
+    return flags;
 }

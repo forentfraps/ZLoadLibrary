@@ -2,13 +2,14 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = std.builtin.OptimizeMode.Debug;
+    // const optimize = std.builtin.OptimizeMode.Debug;
+    const optimize = b.standardOptimizeOption(.{});
 
-    const syscall_dep = b.dependency("syscall_manager", .{ .target = target, .optimize = optimize });
+    const syscall_dep = b.dependency("syscall_manager", .{});
     const syscall_module = syscall_dep.module("syscall_manager");
-
-    const sys_logger_dep = b.dependency("sys_logger", .{ .target = target, .optimize = optimize });
+    const sys_logger_dep = b.dependency("sys_logger", .{});
     const sys_logger_module = sys_logger_dep.module("sys_logger");
+    const zigwin32 = b.dependency("zigwin32", .{});
 
     const nasm = b.addSystemCommand(&.{ "nasm", "-f", "win64" });
     nasm.addFileArg(b.path("src/Winutils/utils.asm"));
@@ -25,6 +26,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe_mod.link_libc = true;
+    exe_mod.addIncludePath(b.path("src/Winutils/sig_headers"));
+    exe_mod.strip = false;
+    exe_mod.addImport("zigwin32", zigwin32.module("win32"));
     exe_mod.addImport("syscall_manager", syscall_module);
     exe_mod.addImport("sys_logger", sys_logger_module);
     exe_mod.addObjectFile(utils_obj);

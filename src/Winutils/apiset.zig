@@ -1,8 +1,7 @@
 const std = @import("std");
-const win = @import("std").os.windows;
+const win = @import("zigwin32").everything;
 const clr = @import("clr.zig");
 const sneaky_memory = @import("memory.zig");
-const winc = @import("Windows.h.zig");
 const dll = @import("dll.zig");
 const SysLogger = @import("sys_logger").SysLogger;
 var log: SysLogger = undefined;
@@ -144,19 +143,17 @@ pub fn checkApiSet(dllname: []const u16) bool {
 
 // ---------------- adapted resolver (minimal change) ----------------
 
-pub fn ApiSetResolve(apiset_name_in: []const u16) ?[]u16 {
+pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16) ?[]u16 {
     log = dll.log;
     if (!checkApiSet(apiset_name_in)) return null;
 
-    // PEB->ApiSetMap (x64)
     const ApiSetMap: *ApiSetNamespaceHeader = asm volatile (
         \\mov %gs:0x60, %rax
         \\add $0x68, %rax
         \\mov (%rax), %rax
         : [ApiSetMap] "={rax}" (-> *ApiSetNamespaceHeader),
         :
-        : "memory"
-    );
+        : "memory");
 
     if (ApiSetMap.version < 6 or ApiSetMap.count == 0) {
         log.crit16("BAD API VERSION OR NO MAPS", .{}, apiset_name_in);
@@ -171,7 +168,6 @@ pub fn ApiSetResolve(apiset_name_in: []const u16) ?[]u16 {
     const nsEntryArray: [*]const ApiSetNamespaceEntry =
         @ptrFromInt(base_ptr + @as(usize, ApiSetMap.offsetArrayNamespaceEntries));
 
-    // --- helpers ---
     const eqFold16 = struct {
         fn eqFold16(a: []const u16, b: []const u16) bool {
             if (a.len != b.len) return false;
@@ -187,31 +183,57 @@ pub fn ApiSetResolve(apiset_name_in: []const u16) ?[]u16 {
         }
     }.eqFold16;
 
+    // Case-insensitive ASCII match between a []u16 and a []u8 blacklist entry
+    const matchBlacklistEntry = struct {
+        fn match(a_in: []const u16, b_in: []const u16) bool {
+            var a = a_in;
+            var b = b_in;
+
+            // strip trailing .dll (case-insensitive) from both sides
+            const stripDll = struct {
+                fn strip(s: []const u16) []const u16 {
+                    if (s.len < 4) return s;
+                    const t = s[s.len - 4 ..];
+                    if (t[0] == '.' and
+                        (t[1] | 0x20) == 'd' and
+                        (t[2] | 0x20) == 'l' and
+                        (t[3] | 0x20) == 'l') return s[0 .. s.len - 4];
+                    return s;
+                }
+            }.strip;
+
+            a = stripDll(a);
+            b = stripDll(b);
+
+            if (a.len != b.len) return false;
+            var i: usize = 0;
+            while (i < a.len) : (i += 1) {
+                const ca = if (a[i] >= 'A' and a[i] <= 'Z') a[i] + 32 else a[i];
+                const cb = if (b[i] >= 'A' and b[i] <= 'Z') b[i] + 32 else b[i];
+                if (ca != cb) return false;
+            }
+            return true;
+        }
+    }.match;
+
     const hashFold16 = struct {
         fn hashFold16(mult: u32, s: []const u16) u32 {
             var h: u32 = 0;
             var i: usize = 0;
             while (i < s.len) : (i += 1) {
                 var c = s[i];
-                if (c >= 'A' and c <= 'Z') c += 32; // lowercase fold
+                if (c >= 'A' and c <= 'Z') c += 32;
                 h = h *% mult + @as(u32, @intCast(c));
             }
             return h;
         }
     }.hashFold16;
-    // ---------------
 
-    // Normalize input: strip ".dll"
     const full = stripDllExt(apiset_name_in);
-
-    // Key = prefix up to (but not including) the last hyphen
     const key_end = hyphenLen(@constCast(full));
     const key = full[0..key_end];
-
-    // Hash the **prefix** only (lowercased), per schema
     const target_hash = hashFold16(ApiSetMap.hashMultiplier, key);
 
-    // lower_bound over sorted hash table
     var lo: usize = 0;
     var hi: usize = count;
     while (lo < hi) {
@@ -224,7 +246,6 @@ pub fn ApiSetResolve(apiset_name_in: []const u16) ?[]u16 {
         return null;
     }
 
-    // collision scan: verify prefix against namespace name’s own prefix
     var found: ?*const ApiSetNamespaceEntry = null;
     var idx = lo;
     while (idx < count and hashEntryArray[idx].hash == target_hash) : (idx += 1) {
@@ -233,12 +254,9 @@ pub fn ApiSetResolve(apiset_name_in: []const u16) ?[]u16 {
         if (ns_index >= count) continue;
 
         const e = &nsEntryArray[ns_index];
-
         const name_ptr: [*]const u16 = @ptrFromInt(base_ptr + @as(usize, e.nameOffset));
         const name_len: usize = @intCast(e.nameSize / 2);
         const map_full = name_ptr[0..name_len];
-
-        // Compare **prefix up to last hyphen** on both sides
         const map_key_end = hyphenLen(@constCast(map_full));
         const map_key = map_full[0..map_key_end];
 
@@ -261,8 +279,38 @@ pub fn ApiSetResolve(apiset_name_in: []const u16) ?[]u16 {
     const valueEntriesArray: [*]const ApiSetValueEntry =
         @ptrFromInt(base_ptr + @as(usize, e.valueEntriesOffset));
 
-    // Default host is first entry
-    const v0 = valueEntriesArray[0];
-    const dllName: [*]u16 = @ptrFromInt(base_ptr + @as(usize, v0.valueOffset));
-    return dllName[0..(@as(usize, v0.valueLength) / 2)];
+    // Walk all host entries, skip any that are in the blacklist.
+    // Entry[0] is the default/fallback; higher indices are caller-specific overrides.
+    // We prefer the highest-indexed non-blacklisted entry (most specific), falling
+    // back toward entry[0] if everything else is blacklisted.
+    var best: ?[]u16 = null;
+    var i: usize = 0;
+    while (i < e.hostCount) : (i += 1) {
+        const v = valueEntriesArray[i];
+        if (v.valueLength == 0) continue; // empty = redirect-to-self sentinel, skip
+
+        const host_name: []u16 = blk: {
+            const ptr: [*]u16 = @ptrFromInt(base_ptr + @as(usize, v.valueOffset));
+            break :blk ptr[0..(@as(usize, v.valueLength) / 2)];
+        };
+
+        // Check against every blacklisted name
+        var blacklisted = false;
+        for (blacklist) |bl| {
+            if (matchBlacklistEntry(host_name, bl)) {
+                // log.info("ApiSetResolve: skipping blacklisted host (entry {d})\n", .{i});
+                blacklisted = true;
+                break;
+            }
+        }
+
+        if (!blacklisted) best = host_name;
+        // Keep iterating: a later non-blacklisted entry is more specific
+    }
+
+    if (best) |result| return result;
+
+    // All hosts were blacklisted — caller should treat this as "no resolution"
+    log.crit16("ApiSetResolve: all hosts blacklisted for ", .{}, apiset_name_in);
+    return null;
 }

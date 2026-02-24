@@ -8,8 +8,6 @@ const c = std.c;
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 
-const winc = @import("Windows.h.zig");
-
 pub const HeapAllocator = switch (builtin.os.tag) {
     .windows => struct {
         heap_handle: ?HeapHandle,

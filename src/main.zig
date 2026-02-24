@@ -14,6 +14,7 @@ const colour_list = [_]colour{colour.green};
 
 pub fn main() !void {
     var log = logger.SysLogger.init(colour_list.len, pref_list, colour_list);
+    log.enabled = true;
     // log.enabled = false;
     // _ = win.kernel32.LoadLibraryW(W("win32u.dll"));
     // std.debug.print("Starting reflective load test...\n", .{});
@@ -22,22 +23,14 @@ pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var loader = dll.DllLoader.init(allocator);
-    try loader.getLoadedDlls();
+    dll.init_logger_zload();
+    try dll.DllLoader.init(allocator);
+    const loader = &dll.GLOBAL_DLL_LOADER;
 
     var it = loader.LoadedDlls.iterator();
     while (it.next()) |key| {
         log.info16("Loaded dll {d}: ", .{key.key_ptr.*.len}, key.key_ptr.*);
     }
-
-    // Optional: patch exports for kernelbase/kernel32 if you still rely on the stubs
-    const kb = try loader.getDllByName("kernelbase.dll");
-    try loader.ResolveImportInconsistencies(kb);
-    const k32 = try loader.getDllByName("kernel32.dll");
-    try loader.ResolveImportInconsistencies(k32);
-
-    // Make the loader available to the GPA/GMH stubs (even though we don't need them here)
-    dll.GLOBAL_DLL_LOADER = &loader;
 
     // Load user32.dll reflectively
     var user32_name16 = try dll.OwnedZ16.fromU8(allocator, "user32.dll");
@@ -52,10 +45,10 @@ pub fn main() !void {
 
     var text = try dll.OwnedZ16.fromU8(allocator, "Hello from reflective loader!");
     var title = try dll.OwnedZ16.fromU8(allocator, "It works !!");
-    defer {
-        text.deinit();
-        title.deinit();
-    }
+    // defer {
+    //     text.deinit();
+    //     title.deinit();
+    // }
 
     // HWND null, OK button
     _ = MessageBoxW(null, text.raw.ptr, title.raw.ptr, 0);

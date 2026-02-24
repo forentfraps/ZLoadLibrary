@@ -25,12 +25,16 @@
     // internet connectivity.
     .dependencies = .{
         .sys_logger = .{
-            .url = "git+https://github.com/forentfraps/sys_logger.git#9b580dfc6370d8792d0761a7f4aaef3b9c8ae7be",
-            .hash = "sys_logger-0.0.0-2yVNLuAtAADHUrIpkIOxQcNoyNkZt71x4IiiqkWwIEoZ",
+            .url = "git+https://github.com/forentfraps/sys_logger.git#8e5350110028f96f382f654a91c74b86d1300790",
+            .hash = "sys_logger-0.0.0-2yVNLjAvAAA7sfCkicGWvb32wdAL6gMu2d9R5vfitnJ1",
         },
         .syscall_manager = .{
-            .url = "git+https://github.com/forentfraps/syscall_manager.git#895a4599b2e12c46aba295dbff0facd42789c4d3",
-            .hash = "syscall_manager-0.0.0-M32ynUdQawBkVmDZSdYITep9wtt_jr4ngR6K3I9H4c6T",
+            .url = "git+https://github.com/forentfraps/syscall_manager.git#1a0c6d18b08062c28f8852078157474a2136dd7f",
+            .hash = "syscall_manager-0.0.0-M32ynSGyawCJaz1FfDujS-bW9oYr39UTTlDGf3VMk15S",
+        },
+        .zigwin32 = .{
+            .url = "git+https://github.com/forentfraps/zigwin32.git#8d5ff24556250f0ecb16410e9c8af8be3933bc35",
+            .hash = "zigwin32-25.0.28-preview-lnxZzKw_5APSEKqgy0QKGNbwv0bDcYMOcyKB-WR-PE6S",
         },
     },
 
