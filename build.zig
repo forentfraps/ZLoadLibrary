@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe_mod.link_libc = true;
+    // exe_mod.link_libc = true;
     exe_mod.addIncludePath(b.path("src/Winutils/sig_headers"));
     exe_mod.strip = false;
     exe_mod.addImport("zigwin32", zigwin32.module("win32"));

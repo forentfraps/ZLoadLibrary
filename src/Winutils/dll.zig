@@ -80,7 +80,7 @@ pub const Dll = struct {
         return self.OrdinalExports.get(ord);
     }
     pub fn getProc(self: *Self, comptime T: type, name: []const u8) !*const T {
-        var buf: [128]u8 = undefined;
+        var buf: [260]u8 = undefined;
         const up = toUpperTemp(&buf, name);
         const p = self.NameExports.get(up) orelse return DllError.FuncResolutionFailed;
         return @ptrCast(@alignCast(p));
@@ -200,6 +200,10 @@ pub fn GetModuleHandleW(moduleName16_: ?[*:0]const u16) callconv(.winapi) ?[*]u8
         log.info16("GMHW ", .{}, owned.raw);
         defer owned.deinit();
         var dllPath = (self.getDllPaths(owned.view()) catch return null) orelse return null;
+        defer {
+            dllPath.deinit();
+            self.Allocator.destroy(dllPath);
+        }
         log.info16("Resolved DLLpath ", .{}, dllPath.short.z);
         dllPath.normalize();
         if (self.LoadedDlls.contains(@constCast(dllPath.shortKey()))) {
@@ -438,6 +442,73 @@ pub const DllLoader = struct {
             GLOBAL_DLL_INIT = true;
         }
     }
+    pub fn deinit() void {
+        const self = &GLOBAL_DLL_LOADER;
+        const ntdll = self.getDllByName("ntdll.dll") catch null;
+        const NtFreeVirtualMemory: ?*const fn (i64, *?[*]u8, *usize, u32) callconv(.winapi) c_int = blk: {
+            if (ntdll) |n| {
+                break :blk n.getProc(
+                    fn (i64, *?[*]u8, *usize, u32) callconv(.winapi) c_int,
+                    "NtFreeVirtualMemory",
+                ) catch null;
+            }
+            break :blk null;
+        };
+
+        const MEM_RELEASE: u32 = 0x8000;
+
+        // Collect which bases came from the PEB so we don't free them
+        var peb_bases = std.AutoHashMap(usize, void).init(self.Allocator);
+        defer peb_bases.deinit();
+        {
+            const peb: *types.PEB = asm volatile ("mov %gs:0x60, %rax"
+                : [peb] "={rax}" (-> *types.PEB),
+                :
+                : .{ .memory = true });
+            const head: *win.LIST_ENTRY = &peb.Ldr.InMemoryOrderModuleList;
+            var curr: *win.LIST_ENTRY = head.Flink.?;
+            while (curr != head) : (curr = curr.Flink.?) {
+                const entry: *LDR_DATA_TABLE_ENTRY = @fieldParentPtr("InMemoryOrderLinks", curr);
+                if (entry.DllBase) |b| {
+                    peb_bases.put(@intFromPtr(b), {}) catch {};
+                }
+            }
+        }
+
+        var it = self.LoadedDlls.valueIterator();
+        while (it.next()) |dll_ptr| {
+            const d = dll_ptr.*;
+
+            // Free NameExports — keys were heap-allocated by toUpperOwned
+            // log.info16("Freeing dll: ", .{}, d.Path.short.z);
+            var key_it = d.NameExports.keyIterator();
+            while (key_it.next()) |k| self.Allocator.free(k.*);
+            d.NameExports.deinit();
+
+            // OrdinalExports — no owned keys
+            d.OrdinalExports.deinit();
+
+            // Path
+            d.Path.deinit();
+            self.Allocator.destroy(d.Path);
+
+            // Mapped memory — only free if we reflectively loaded it
+            const base_addr = @intFromPtr(d.BaseAddr);
+            if (!peb_bases.contains(base_addr)) {
+                if (NtFreeVirtualMemory) |free_fn| {
+                    var base: ?[*]u8 = d.BaseAddr;
+                    var region_size: usize = 0;
+                    _ = free_fn(-1, &base, &region_size, MEM_RELEASE);
+                }
+            }
+            self.Allocator.destroy(d);
+        }
+
+        self.LoadedDlls.deinit();
+        self.InFlight.deinit();
+
+        GLOBAL_DLL_INIT = false;
+    }
 
     pub fn getDllByName(self: *DllLoader, name: []const u8) !*Dll {
         var up = try OwnedZ16.fromAsciiUpper(self.Allocator, name);
@@ -475,6 +546,14 @@ pub const DllLoader = struct {
                 errdefer full_owned.deinit();
                 var short_owned = try OwnedZ16.fromU16(self.Allocator, base_src);
                 errdefer short_owned.deinit();
+                if (!short_owned.endsWithDll()) {
+                    full_owned.deinit();
+                    short_owned.deinit();
+                    self.Allocator.destroy(dll_rec);
+
+                    if (curr == head) break;
+                    continue;
+                }
 
                 dll_rec.Path = try self.Allocator.create(DllPath);
                 dll_rec.Path.* = .{ .full = full_owned, .short = short_owned };
@@ -489,6 +568,7 @@ pub const DllLoader = struct {
     }
 
     pub fn ResolveExports(self: *Self, dll_rec: *Dll) !void {
+        // All allocations here are permanent
         log.setContext(logtags.ExpTable);
         defer log.rollbackContext();
 
@@ -496,6 +576,8 @@ pub const DllLoader = struct {
         const dos: *win.IMAGE_DOS_HEADER = @ptrCast(@alignCast(bytes));
         const nt: *const win.IMAGE_NT_HEADERS64 = @ptrCast(@alignCast(bytes[@intCast(dos.e_lfanew)..]));
         const dir: win.IMAGE_DATA_DIRECTORY = nt.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_EXPORT)];
+        dll_rec.NameExports = std.StringHashMap(*anyopaque).init(self.Allocator);
+        dll_rec.OrdinalExports = std.AutoHashMap(u16, *anyopaque).init(self.Allocator);
         if (dir.Size == 0) return;
 
         const exp: *const win.IMAGE_EXPORT_DIRECTORY = @ptrCast(@alignCast(bytes[dir.VirtualAddress..]));
@@ -505,9 +587,6 @@ pub const DllLoader = struct {
         const eat: [*]align(4) u32 = @ptrCast(@alignCast(bytes[exp.AddressOfFunctions..]));
         const enpt: [*]align(4) u32 = @ptrCast(@alignCast(bytes[exp.AddressOfNames..]));
         const enot: [*]align(4) u16 = @ptrCast(@alignCast(bytes[exp.AddressOfNameOrdinals..]));
-
-        dll_rec.NameExports = std.StringHashMap(*anyopaque).init(self.Allocator);
-        dll_rec.OrdinalExports = std.AutoHashMap(u16, *anyopaque).init(self.Allocator);
 
         var i: u32 = 0;
         while (i < exp.NumberOfFunctions) : (i += 1) {
@@ -886,7 +965,7 @@ pub const DllLoader = struct {
             if (std.mem.eql(u16, dllPath.shortKey(), libraryNameToLoad16.raw)) {
                 library = dll_struct;
             } else {
-                log.info16("Trying to load ", .{}, libraryNameToLoad16.z);
+                // log.info16("Trying to load ", .{}, libraryNameToLoad16.z);
                 library = try self.ZLoadLibrary(libraryNameToLoad16.z);
                 if (library == null) return error.ImportDllIsNull;
 
@@ -1138,11 +1217,10 @@ pub const DllLoader = struct {
 
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
 
-        self.HostExeBase = base;
-
         try self.ResolveImportInconsistencies(dll_struct);
         try self.ResolveImportTable(base, nt, dllPath, dll_struct);
         try self.resolveExportForwarders(dll_struct);
+        self.HostExeBase = base;
 
         log.info16("EXE mapped, running imports done -> ", .{}, dll_struct.Path.shortView());
 
@@ -1213,9 +1291,15 @@ pub const DllLoader = struct {
         }
 
         var dllPath = (try self.getDllPaths(resolved.view())) orelse return null;
+        errdefer dllPath.deinit();
+        errdefer self.Allocator.destroy(dllPath);
         dllPath.normalize();
         const key = dllPath.shortKey();
-        if (self.LoadedDlls.get(key)) |d| return d;
+        if (self.LoadedDlls.get(key)) |d| {
+            dllPath.deinit();
+            self.Allocator.destroy(dllPath);
+            return d;
+        }
 
         if (self.InFlight.contains(key)) {}
         try self.InFlight.put(key, {});

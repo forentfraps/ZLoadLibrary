@@ -2,9 +2,10 @@ const std = @import("std");
 const sigscan = @import("sigscan.zig");
 const dll_mapper = @import("dll.zig");
 const win = @import("zigwin32").everything;
-const c_sig = @cImport({
-    @cInclude("sehfix.h");
-});
+// const c_sig = @cImport({
+//     @cInclude("sehfix.h");
+// });
+const c_sig = @import("sig_headers/sehfix.zig");
 
 pub fn rtlInsertInvertedFunctionTable(loader: *dll_mapper.DllLoader, target_dll: *dll_mapper.Dll) !void {
     const wv = loader.WinVer;

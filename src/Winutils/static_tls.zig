@@ -2,9 +2,10 @@ const std = @import("std");
 const sigscan = @import("sigscan.zig");
 const dll_mapper = @import("dll.zig");
 const win = @import("zigwin32").everything;
-const c_sig = @cImport({
-    @cInclude("handle_tls_sig.h");
-});
+// const c_sig = @cImport({
+//     @cInclude("handle_tls_sig.h");
+// });
+const c_sig = @import("sig_headers/handle_tls_sig.zig");
 
 const PAGE_READWRITE: u32 = 0x04;
 
