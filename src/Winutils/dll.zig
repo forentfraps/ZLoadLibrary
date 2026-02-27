@@ -285,6 +285,7 @@ pub fn ResolveDelayLoadedAPI_stub(
     const lib_u8z: [*:0]const u8 = @ptrCast(parent_base[descriptor.DllNameRVA..]);
     var owned = OwnedZ16.fromU8z(self.Allocator, lib_u8z) catch return null;
     defer owned.deinit();
+    log.info16("DelayLoading: ", .{}, owned.view());
     if (apiset.ApiSetResolve(owned.view(), &.{})) |host_z| {
         const host_sz: [:0]u16 = @ptrCast(host_z);
         owned.replaceWithZ16(host_sz) catch return null;
@@ -420,6 +421,9 @@ pub const DllLoader = struct {
     InFlight: U16Set = undefined,
     WinVer: sigscan.WinVer = undefined,
     HostExeBase: ?[*]u8 = null,
+    PendingInit: std.ArrayList(*Dll),
+    LoadDepth: u32 = 0,
+    IsFlushing: bool = false,
 
     const Self = @This();
 
@@ -429,14 +433,15 @@ pub const DllLoader = struct {
                 .LoadedDlls = undefined,
                 .Allocator = allocator,
                 .InFlight = U16Set.init(allocator),
+                .PendingInit = try std.ArrayList(*Dll).initCapacity(allocator, 1),
             };
             init_logger_zload();
             const loader = &GLOBAL_DLL_LOADER;
             try loader.getLoadedDlls();
             const kb = try loader.getDllByName("kernelbase.dll");
-            try loader.ResolveImportInconsistencies(kb);
+            try loader.PatchExportTableLoaderStubs(kb);
             const k32 = try loader.getDllByName("kernel32.dll");
-            try loader.ResolveImportInconsistencies(k32);
+            try loader.PatchExportTableLoaderStubs(k32);
             try loader.resolveKnownForwarders();
             GLOBAL_DLL_LOADER.WinVer = try sigscan.getWinVer(loader);
             GLOBAL_DLL_INIT = true;
@@ -474,7 +479,21 @@ pub const DllLoader = struct {
                 }
             }
         }
-
+        var detach_list = std.ArrayList(*Dll).initCapacity(self.Allocator, self.LoadedDlls.unmanaged.size) catch unreachable;
+        defer detach_list.deinit(self.Allocator);
+        {
+            var it = self.LoadedDlls.valueIterator();
+            while (it.next()) |dll_ptr| {
+                const d = dll_ptr.*;
+                if (!peb_bases.contains(@intFromPtr(d.BaseAddr)))
+                    detach_list.append(self.Allocator, d) catch {};
+            }
+        }
+        var i: usize = detach_list.items.len;
+        while (i > 0) {
+            i -= 1;
+            self.DetachDll(detach_list.items[i]);
+        }
         var it = self.LoadedDlls.valueIterator();
         while (it.next()) |dll_ptr| {
             const d = dll_ptr.*;
@@ -508,6 +527,33 @@ pub const DllLoader = struct {
         self.InFlight.deinit();
 
         GLOBAL_DLL_INIT = false;
+    }
+    pub fn DetachDll(_: *Self, dll_rec: *Dll) void {
+        // TODO reverse the FLS/TLS unload, not sure if viable
+        const nt = DllLoader.ResolveNtHeaders(dll_rec.BaseAddr) catch return;
+
+        // Fire TLS callbacks with DLL_PROCESS_DETACH first
+        if (nt.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_TLS)].Size != 0) {
+            const tls_dir: *const win.IMAGE_TLS_DIRECTORY64 = @ptrCast(@alignCast(
+                dll_rec.BaseAddr[nt.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_TLS)].VirtualAddress..],
+            ));
+            if (tls_dir.AddressOfCallBacks != 0) {
+                var p: [*]?*const types.DLLEntry = @ptrFromInt(tls_dir.AddressOfCallBacks);
+                const hinst: win.HINSTANCE = @ptrCast(dll_rec.BaseAddr);
+                while (p[0]) |cb| : (p = p[1..]) _ = cb(hinst, win.DLL_PROCESS_DETACH, null);
+            }
+        }
+
+        if (nt.OptionalHeader.AddressOfEntryPoint != 0) {
+            const dll_entry: ?*const types.DLLEntry = @ptrCast(
+                dll_rec.BaseAddr[nt.OptionalHeader.AddressOfEntryPoint..],
+            );
+            if (dll_entry) |run| {
+                const hinst: win.HINSTANCE = @ptrCast(dll_rec.BaseAddr);
+                log.info16("DLL_PROCESS_DETACH -> ", .{}, dll_rec.Path.shortView());
+                _ = run(hinst, win.DLL_PROCESS_DETACH, null);
+            }
+        }
     }
 
     pub fn getDllByName(self: *DllLoader, name: []const u8) !*Dll {
@@ -891,6 +937,7 @@ pub const DllLoader = struct {
             if (status < 0 or dll_base_dirty == null) return DllError.VirtualAllocNull;
         }
         const dll_base = dll_base_dirty.?;
+        log.info("dllbase -> {*}\n", .{dll_base});
         delta_image_base.* = @intFromPtr(dll_base) - nt_headers.OptionalHeader.ImageBase;
 
         std.mem.copyForwards(u8, dll_base[0..nt_headers.OptionalHeader.SizeOfHeaders], dll_bytes[0..nt_headers.OptionalHeader.SizeOfHeaders]);
@@ -967,7 +1014,10 @@ pub const DllLoader = struct {
             } else {
                 // log.info16("Trying to load ", .{}, libraryNameToLoad16.z);
                 library = try self.ZLoadLibrary(libraryNameToLoad16.z);
-                if (library == null) return error.ImportDllIsNull;
+                if (library == null) {
+                    log.crit16("Failed to resolve DURING IMOPRTS: ", .{}, libraryNameToLoad16.z);
+                    return error.ImportDllIsNull;
+                }
 
                 var orig_thunk_rva: u32 = import_descriptor.Anonymous.OriginalFirstThunk;
                 const thunk_rva: u32 = import_descriptor.FirstThunk;
@@ -991,8 +1041,8 @@ pub const DllLoader = struct {
                         if (looksLikeForwarderString(addr_bytes)) {
                             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(addr)), 0);
                             addr = try self.resolveForwarder(fwd_slice, dllPath);
-                            log.crit("FWD to resolve {s}\n", .{fwd_slice});
-                            log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
+                            // log.crit("FWD to resolve {s}\n", .{fwd_slice});
+                            // log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
                         }
                         thunk.u1.Function = @intFromPtr(addr);
                     } else {
@@ -1003,8 +1053,8 @@ pub const DllLoader = struct {
                         const addr_bytes: [*]const u8 = @ptrCast(addr);
                         if (looksLikeForwarderString(addr_bytes)) {
                             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(addr)), 0);
-                            log.crit("FWD to resolve {s}\n", .{fwd_slice});
-                            log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
+                            // log.crit("FWD to resolve {s}\n", .{fwd_slice});
+                            // log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
                             addr = try self.resolveForwarder(fwd_slice, dllPath);
                         }
                         thunk.u1.Function = @intFromPtr(addr);
@@ -1097,7 +1147,7 @@ pub const DllLoader = struct {
         }
     }
 
-    pub fn ResolveImportInconsistencies(self: *Self, dll_rec: *Dll) !void {
+    pub fn PatchExportTableLoaderStubs(self: *Self, dll_rec: *Dll) !void {
         _ = self;
         log.setContext(logtags.ImpFix);
         defer log.rollbackContext();
@@ -1136,6 +1186,41 @@ pub const DllLoader = struct {
     }
 
     pub fn ExecuteDll(self: *Self, dll_rec: *Dll) !void {
+        const kernel32 = try self.getDllByName("kernel32.dll");
+        const CreateActCtxW = try kernel32.getProc(fn (*anyopaque) callconv(.winapi) ?*anyopaque, "CreateActCtxW");
+        const ActivateActCtx = try kernel32.getProc(fn (?*anyopaque, *usize) callconv(.winapi) i32, "ActivateActCtx");
+        const DeactivateActCtx = try kernel32.getProc(fn (u32, usize) callconv(.winapi) i32, "DeactivateActCtx");
+        const ReleaseActCtx = try kernel32.getProc(fn (?*anyopaque) callconv(.winapi) void, "ReleaseActCtx");
+
+        const ACTCTXW = extern struct {
+            cbSize: u32,
+            dwFlags: u32,
+            lpSource: ?*anyopaque,
+            wProcessorArchitecture: u16,
+            wLangId: u16,
+            lpAssemblyDirectory: ?*anyopaque,
+            lpResourceName: ?*anyopaque,
+            lpApplicationName: ?*anyopaque,
+            hModule: ?*anyopaque,
+        };
+
+        // Create and activate the DLL's own activation context around DllMain,
+        // mirroring what LdrpCallInitRoutine does via EntryPointActivationContext
+        var ctx = std.mem.zeroes(ACTCTXW);
+        ctx.cbSize = @sizeOf(ACTCTXW);
+        ctx.dwFlags = 0x80 | 0x20; // HMODULE_VALID | RESOURCE_NAME_VALID
+        ctx.lpResourceName = @ptrFromInt(2); // ID 2 for DLLs — plugin/isolation context
+        ctx.hModule = dll_rec.BaseAddr;
+
+        const INVALID_HANDLE: usize = ~@as(usize, 0);
+        const hActCtx = CreateActCtxW(&ctx);
+        var cookie: usize = 0;
+        const actctx_valid = hActCtx != null and @intFromPtr(hActCtx.?) != INVALID_HANDLE;
+        if (actctx_valid) _ = ActivateActCtx(hActCtx, &cookie);
+        defer {
+            if (cookie != 0) _ = DeactivateActCtx(0, cookie);
+            if (actctx_valid) ReleaseActCtx(hActCtx);
+        }
         const ntdll_dll = (try self.getDllByName("ntdll.dll"));
         const NtProtectVirtualMemory = try ntdll_dll.getProc(fn (i64, *const [*]u8, *const usize, c_int, *c_int) callconv(.winapi) c_int, "NtProtectVirtualMemory");
         const NtFlushInstructionCache = try ntdll_dll.getProc(fn (i32, ?[*]u8, usize) callconv(.winapi) c_int, "NtFlushInstructionCache");
@@ -1208,6 +1293,7 @@ pub const DllLoader = struct {
         }
 
         var delta: usize = 0;
+        log.info16("Mapping: ", .{}, dll_struct.Path.short.z);
         const base = try self.MapSections(nt, dll_bytes, &delta);
         dll_struct.BaseAddr = base;
         nt = try ResolveNtHeaders(base);
@@ -1217,7 +1303,7 @@ pub const DllLoader = struct {
 
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
 
-        try self.ResolveImportInconsistencies(dll_struct);
+        try self.PatchExportTableLoaderStubs(dll_struct);
         try self.ResolveImportTable(base, nt, dllPath, dll_struct);
         try self.resolveExportForwarders(dll_struct);
         self.HostExeBase = base;
@@ -1301,9 +1387,17 @@ pub const DllLoader = struct {
             return d;
         }
 
-        if (self.InFlight.contains(key)) {}
+        if (self.InFlight.contains(key)) {
+            //TODO
+        }
         try self.InFlight.put(key, {});
-        defer _ = self.InFlight.remove(key);
+        self.LoadDepth += 1;
+        defer {
+            self.LoadDepth -= 1;
+            if (self.LoadDepth == 0) {
+                self.FlushPendingInits() catch {};
+            }
+        }
 
         var dll_struct: *Dll = try self.Allocator.create(Dll);
         dll_struct.Path = dllPath;
@@ -1322,8 +1416,8 @@ pub const DllLoader = struct {
 
         try ResolveRVA(base, nt, delta);
         try self.ResolveExports(dll_struct);
+        try self.PatchExportTableLoaderStubs(dll_struct);
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
-        try self.ResolveImportInconsistencies(dll_struct);
         self.ResolveImportTable(base, nt, dllPath, dll_struct) catch |e| {
             log.crit(
                 "Failed to resolve imports {}\n",
@@ -1333,11 +1427,24 @@ pub const DllLoader = struct {
         };
 
         try self.resolveExportForwarders(dll_struct);
-
-        log.info16("executing ", .{}, dll_struct.Path.shortView());
-        try self.ExecuteDll(dll_struct);
+        try self.PendingInit.append(self.Allocator, dll_struct);
+        // log.info16("executing ", .{}, dll_struct.Path.shortView());
+        // try self.ExecuteDll(dll_struct);
+        _ = self.InFlight.remove(key);
 
         return dll_struct;
+    }
+    pub fn FlushPendingInits(self: *Self) !void {
+        if (self.IsFlushing) return;
+        self.IsFlushing = true;
+        defer self.IsFlushing = false;
+        var i: usize = 0;
+        while (i < self.PendingInit.items.len) : (i += 1) {
+            const dll_rec = self.PendingInit.items[i];
+            log.info16("executing ", .{}, dll_rec.Path.shortView());
+            try self.ExecuteDll(dll_rec);
+        }
+        self.PendingInit.clearRetainingCapacity();
     }
 
     pub fn CreateLdrDataTableEntryFromImageBase(self: *Self, dll_rec: *Dll) !*LDR_DATA_TABLE_ENTRY {

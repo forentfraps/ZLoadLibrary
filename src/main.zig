@@ -27,44 +27,72 @@ pub fn main() !void {
 
         dll.init_logger_zload();
         try dll.DllLoader.init(allocator);
-        defer dll.DllLoader.deinit();
+        // defer dll.DllLoader.deinit();
         const loader = &dll.GLOBAL_DLL_LOADER;
 
         var it = loader.LoadedDlls.iterator();
         while (it.next()) |key| {
             log.info16("Loaded dll {d}: ", .{key.key_ptr.*.len}, key.key_ptr.*);
         }
-        // var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\Users\\pseud\\Desktop\\release\\x64\\x64dbg.exe");
-        // var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\ZLoadLibrary\\src\\Tests\\file_dialog.exe");
-        // var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\purgatory_packer\\src\\test_bin\\test_msgbox.exe");
-        // defer exe_name.deinit();
-        // const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
-        // try loader.RunExe(exe);
+        // try test_x64dbg(allocator);
 
-        // Load user32.dll reflectively
-        var user32_name16 = try dll.OwnedZ16.fromU8(allocator, "user32.dll");
-        defer user32_name16.deinit();
-        log.info16("user32 name16 ", .{}, user32_name16.raw);
-        const user32 = (try loader.ZLoadLibrary(user32_name16.view())) orelse @panic("Failed to load");
-        // std.debug.print("user32 loaded!\n", .{});
-
-        // Grab MessageBoxW from the (uppercased-key) export map
-        const MessageBoxW =
-            try user32.getProc(fn (?*anyopaque, [*]const u16, [*]const u16, u32) callconv(.winapi) c_int, "MessageBoxW");
-
-        var text = try dll.OwnedZ16.fromU8(allocator, "Hello from reflective loader!");
-        var title = try dll.OwnedZ16.fromU8(allocator, "It works !!");
-        defer {
-            text.deinit();
-            title.deinit();
-        }
-
-        // HWND null, OK button
-        _ = MessageBoxW(null, text.raw.ptr, title.raw.ptr, 0);
+        try test_sxs(allocator);
+        // try test_msgexternal(allocator);
 
         std.debug.print("Done.\n", .{});
     }
-    if (gpa.detectLeaks() != 0) {
-        std.debug.print("Leaking!\n", .{});
+    // if (gpa.detectLeaks() != 0) {
+    // std.debug.print("Leaking!\n", .{});
+    // }
+}
+pub fn test_x64dbg(allocator: std.mem.Allocator) !void {
+    const loader = &dll.GLOBAL_DLL_LOADER;
+    var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\Users\\pseud\\Desktop\\release\\x64\\x64dbg.exe");
+    defer exe_name.deinit();
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    try loader.RunExe(exe);
+}
+
+pub fn test_dialog(allocator: std.mem.Allocator) !void {
+    const loader = &dll.GLOBAL_DLL_LOADER;
+    var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\ZLoadLibrary\\src\\Tests\\file_dialog.exe");
+    defer exe_name.deinit();
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    try loader.RunExe(exe);
+}
+pub fn test_msginteral(allocator: std.mem.Allocator) !void {
+    const loader = &dll.GLOBAL_DLL_LOADER;
+    var user32_name16 = try dll.OwnedZ16.fromU8(allocator, "user32.dll");
+    defer user32_name16.deinit();
+    const user32 = (try loader.ZLoadLibrary(user32_name16.view())) orelse @panic("Failed to load");
+    // std.debug.print("user32 loaded!\n", .{});
+
+    // Grab MessageBoxW from the (uppercased-key) export map
+    const MessageBoxW =
+        try user32.getProc(fn (?*anyopaque, [*]const u16, [*]const u16, u32) callconv(.winapi) c_int, "MessageBoxW");
+
+    var text = try dll.OwnedZ16.fromU8(allocator, "Hello from reflective loader!");
+    var title = try dll.OwnedZ16.fromU8(allocator, "It works !!");
+    defer {
+        text.deinit();
+        title.deinit();
     }
+
+    // HWND null, OK button
+    _ = MessageBoxW(null, text.raw.ptr, title.raw.ptr, 0);
+}
+pub fn test_msgexternal(allocator: std.mem.Allocator) !void {
+    const loader = &dll.GLOBAL_DLL_LOADER;
+    var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\purgatory_packer\\src\\test_bin\\test_msgbox.exe");
+    defer exe_name.deinit();
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    try loader.RunExe(exe);
+}
+
+pub fn test_sxs(allocator: std.mem.Allocator) !void {
+    const loader = &dll.GLOBAL_DLL_LOADER;
+    var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\ZLoadLibrary\\src\\Tests\\sxs_minimal.exe");
+    defer exe_name.deinit();
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    try loader.RunExe(exe);
 }

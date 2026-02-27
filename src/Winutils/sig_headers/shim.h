@@ -7,4 +7,4 @@
 #define __UINT64_C(x) x##ULL
 #endif
 
-#include "sehfix.h"
+#include "PDBPARSEDHEADER.h"
