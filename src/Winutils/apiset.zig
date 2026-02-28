@@ -4,7 +4,10 @@ const clr = @import("clr.zig");
 const sneaky_memory = @import("memory.zig");
 const dll = @import("dll.zig");
 const SysLogger = @import("sys_logger").SysLogger;
-var log: SysLogger = undefined;
+const NullLogger = @import("dll.zig").NullLogger;
+const builtin = @import("builtin");
+
+pub var log: if (builtin.mode == .Debug) SysLogger else NullLogger = undefined;
 const print = std.debug.print;
 
 // --- your structs kept as-is ---

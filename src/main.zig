@@ -9,6 +9,9 @@ const win = std.os.windows;
 const pref_list = [_][]const u8{"MAIN"};
 const colour = logger.SysLoggerColour;
 const colour_list = [_]colour{colour.green};
+const SysLogger = @import("sys_logger").SysLogger;
+const NullLogger = dll.NullLogger;
+const builtin = @import("builtin");
 
 // Uppercase lookup helper to match NameExports keys
 
@@ -21,12 +24,12 @@ pub fn main() !void {
     // Debug allocator makes it easy to catch leaks / double frees while iterating
     var gpa = std.heap.DebugAllocator(.{}){};
     {
-        var log = logger.SysLogger.init(colour_list.len, pref_list, colour_list);
-        log.enabled = true;
+        var log: if (builtin.mode == .Debug) SysLogger else NullLogger = undefined;
+
         const allocator = gpa.allocator();
 
         dll.init_logger_zload();
-        try dll.DllLoader.init(allocator);
+        dll.DllLoader.init(allocator) catch unreachable;
         // defer dll.DllLoader.deinit();
         const loader = &dll.GLOBAL_DLL_LOADER;
 
@@ -36,8 +39,8 @@ pub fn main() !void {
         }
         // try test_x64dbg(allocator);
 
-        try test_sxs(allocator);
-        // try test_msgexternal(allocator);
+        // try test_sxs(allocator);
+        test_msgexternal(allocator) catch unreachable;
 
         std.debug.print("Done.\n", .{});
     }
@@ -49,7 +52,7 @@ pub fn test_x64dbg(allocator: std.mem.Allocator) !void {
     const loader = &dll.GLOBAL_DLL_LOADER;
     var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\Users\\pseud\\Desktop\\release\\x64\\x64dbg.exe");
     defer exe_name.deinit();
-    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse unreachable;
     try loader.RunExe(exe);
 }
 
@@ -57,14 +60,14 @@ pub fn test_dialog(allocator: std.mem.Allocator) !void {
     const loader = &dll.GLOBAL_DLL_LOADER;
     var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\ZLoadLibrary\\src\\Tests\\file_dialog.exe");
     defer exe_name.deinit();
-    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse unreachable;
     try loader.RunExe(exe);
 }
 pub fn test_msginteral(allocator: std.mem.Allocator) !void {
     const loader = &dll.GLOBAL_DLL_LOADER;
     var user32_name16 = try dll.OwnedZ16.fromU8(allocator, "user32.dll");
     defer user32_name16.deinit();
-    const user32 = (try loader.ZLoadLibrary(user32_name16.view())) orelse @panic("Failed to load");
+    const user32 = (try loader.ZLoadLibrary(user32_name16.view())) orelse unreachable;
     // std.debug.print("user32 loaded!\n", .{});
 
     // Grab MessageBoxW from the (uppercased-key) export map
@@ -85,7 +88,7 @@ pub fn test_msgexternal(allocator: std.mem.Allocator) !void {
     const loader = &dll.GLOBAL_DLL_LOADER;
     var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\purgatory_packer\\src\\test_bin\\test_msgbox.exe");
     defer exe_name.deinit();
-    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse unreachable;
     try loader.RunExe(exe);
 }
 
@@ -93,6 +96,6 @@ pub fn test_sxs(allocator: std.mem.Allocator) !void {
     const loader = &dll.GLOBAL_DLL_LOADER;
     var exe_name = try dll.OwnedZ16.fromU8(allocator, "C:\\coding\\win_rofls\\ZLoadLibrary\\src\\Tests\\sxs_minimal.exe");
     defer exe_name.deinit();
-    const exe = (try loader.ZLoadExe(exe_name.view())) orelse @panic("Failed to map EXE");
+    const exe = (try loader.ZLoadExe(exe_name.view())) orelse unreachable;
     try loader.RunExe(exe);
 }

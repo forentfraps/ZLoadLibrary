@@ -1,5 +1,6 @@
 const std = @import("std");
 const winz = std.os.windows;
+const builtin = @import("builtin");
 const clr = @import("clr.zig");
 const sneaky_memory = @import("memory.zig");
 const logger = @import("sys_logger");
@@ -54,11 +55,21 @@ const logtags = enum {
     HookF,
     PathRes,
 };
+pub const NullLogger = struct {
+    pub inline fn info(_: *@This(), comptime _: []const u8, _: anytype) void {}
+    pub inline fn info16(_: *@This(), comptime _: []const u8, _: anytype, _: []const u16) void {}
+    pub inline fn crit(_: *@This(), comptime _: []const u8, _: anytype) void {}
+    pub inline fn crit16(_: *@This(), comptime _: []const u8, _: anytype, _: []const u16) void {}
+    pub inline fn setContext(_: *@This(), _: anytype) void {}
+    pub inline fn rollbackContext(_: *@This()) void {}
+};
 
-pub var log: logger.SysLogger = undefined;
+pub var log: if (builtin.mode == .Debug) logger.SysLogger else NullLogger = undefined;
 pub fn init_logger_zload() void {
-    log = logger.SysLogger.init(colour_list.len, pref_list, colour_list);
-    log.enabled = true;
+    if (builtin.mode == .Debug) {
+        log = logger.SysLogger.init(colour_list.len, pref_list, colour_list);
+        log.enabled = true;
+    }
 }
 
 // ===== Dll record =====
@@ -438,10 +449,8 @@ pub const DllLoader = struct {
             init_logger_zload();
             const loader = &GLOBAL_DLL_LOADER;
             try loader.getLoadedDlls();
-            const kb = try loader.getDllByName("kernelbase.dll");
-            try loader.PatchExportTableLoaderStubs(kb);
-            const k32 = try loader.getDllByName("kernel32.dll");
-            try loader.PatchExportTableLoaderStubs(k32);
+            var it = loader.LoadedDlls.valueIterator();
+            while (it.next()) |dll_ptr| try loader.PatchExportTableLoaderStubs(dll_ptr.*);
             try loader.resolveKnownForwarders();
             GLOBAL_DLL_LOADER.WinVer = try sigscan.getWinVer(loader);
             GLOBAL_DLL_INIT = true;
@@ -1361,7 +1370,163 @@ pub const DllLoader = struct {
         log.info16("Jumping to EXE entrypoint ->", .{}, exe.Path.shortView());
         ep();
     }
+    fn makeDllPathFromName(self: *Self, name16: [:0]const u16) !*DllPath {
+        var full_owned = try OwnedZ16.fromU16(self.Allocator, name16[0 .. name16.len + 1]);
+        errdefer full_owned.deinit();
+        var short_owned = try OwnedZ16.fromU16(self.Allocator, name16[0 .. name16.len + 1]);
+        errdefer short_owned.deinit();
+        var dp = try self.Allocator.create(DllPath);
+        dp.* = .{ .full = full_owned, .short = short_owned };
+        dp.normalize();
+        return dp;
+    }
 
+    pub fn ZLoadLibraryFromMemory(
+        self: *Self,
+        dll_name16: [:0]const u16,
+        bytes: []const u8,
+    ) anyerror!?*Dll {
+        log.setContext(logtags.RefLoad);
+        defer log.rollbackContext();
+
+        var resolved = try OwnedZ16.fromU16(self.Allocator, dll_name16[0 .. dll_name16.len + 1]);
+        defer resolved.deinit();
+        try resolved.canonicalUpperDll();
+
+        if (apiset.ApiSetResolve(resolved.view(), &.{})) |host_z| {
+            const host_sz: [:0]u16 = @ptrCast(host_z);
+            try resolved.replaceWithZ16(host_sz);
+            try resolved.canonicalUpperDll();
+        }
+
+        if (self.LoadedDlls.get(resolved.raw)) |d| return d;
+
+        if (self.InFlight.contains(resolved.raw)) return null;
+        try self.InFlight.put(resolved.raw, {});
+
+        self.LoadDepth += 1;
+        defer {
+            self.LoadDepth -= 1;
+            if (self.LoadDepth == 0) self.FlushPendingInits() catch {};
+        }
+
+        var dllPath = try self.makeDllPathFromName(resolved.view());
+        errdefer {
+            dllPath.deinit();
+            self.Allocator.destroy(dllPath);
+        }
+
+        var dll_struct: *Dll = try self.Allocator.create(Dll);
+        errdefer self.Allocator.destroy(dll_struct);
+        dll_struct.Path = dllPath;
+
+        var nt = try ResolveNtHeaders(@constCast(bytes.ptr));
+        var delta: usize = 0;
+
+        log.info16("ZLoadLibraryFromMemory mapping: ", .{}, dllPath.short.z);
+        const base = try self.MapSections(nt, @constCast(bytes.ptr), &delta);
+        dll_struct.BaseAddr = base;
+        nt = try ResolveNtHeaders(base);
+
+        try ResolveRVA(base, nt, delta);
+        try self.ResolveExports(dll_struct);
+        try self.PatchExportTableLoaderStubs(dll_struct);
+        try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
+
+        self.ResolveImportTable(base, nt, dllPath, dll_struct) catch |e| {
+            log.crit("ZLoadLibraryFromMemory: import resolution failed: {}\n", .{e});
+            return e;
+        };
+
+        try self.resolveExportForwarders(dll_struct);
+        try self.PendingInit.append(self.Allocator, dll_struct);
+        _ = self.InFlight.remove(resolved.raw);
+
+        return dll_struct;
+    }
+
+    pub fn ZLoadExeFromMemory(
+        self: *Self,
+        exe_name16: [:0]const u16,
+        bytes: []const u8,
+    ) anyerror!?*Dll {
+        log.setContext(logtags.RefLoad);
+        defer log.rollbackContext();
+
+        var resolved = try OwnedZ16.fromU16(self.Allocator, exe_name16[0 .. exe_name16.len + 1]);
+        defer resolved.deinit();
+        resolved.toUpperAsciiInPlace();
+
+        var nt = try ResolveNtHeaders(@constCast(bytes.ptr));
+        if (nt.FileHeader.Characteristics.DLL != 0) {
+            log.crit("ZLoadExeFromMemory: supplied image is a DLL, not an EXE\n", .{});
+            return DllError.LoadFailed;
+        }
+
+        var dllPath = try self.makeDllPathFromName(resolved.view());
+        errdefer {
+            dllPath.deinit();
+            self.Allocator.destroy(dllPath);
+        }
+
+        var dll_struct: *Dll = try self.Allocator.create(Dll);
+        errdefer self.Allocator.destroy(dll_struct);
+        dll_struct.Path = dllPath;
+
+        var delta: usize = 0;
+        log.info16("ZLoadExeFromMemory mapping: ", .{}, dllPath.short.z);
+        const base = try self.MapSections(nt, @constCast(bytes.ptr), &delta);
+        dll_struct.BaseAddr = base;
+        nt = try ResolveNtHeaders(base);
+
+        try ResolveRVA(base, nt, delta);
+        try self.ResolveExports(dll_struct);
+        try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
+        try self.PatchExportTableLoaderStubs(dll_struct);
+        try self.ResolveImportTable(base, nt, dllPath, dll_struct);
+        try self.resolveExportForwarders(dll_struct);
+        self.HostExeBase = base;
+
+        const ntdll_dll = try self.getDllByName("ntdll.dll");
+        const NtProtectVirtualMemory = try ntdll_dll.getProc(
+            fn (i64, *const [*]u8, *const usize, c_int, *c_int) callconv(.winapi) c_int,
+            "NtProtectVirtualMemory",
+        );
+        const NtFlushInstructionCache = try ntdll_dll.getProc(
+            fn (i32, ?[*]u8, usize) callconv(.winapi) c_int,
+            "NtFlushInstructionCache",
+        );
+
+        const sectionHeader = IMAGE_FIRST_SECTION(nt);
+        var i: usize = 0;
+        while (i < nt.FileHeader.NumberOfSections) : (i += 1) {
+            if (sectionHeader[i].SizeOfRawData == 0) continue;
+            const protection = clr.sectionCharacteristicsToPageProtection(sectionHeader[i].Characteristics);
+            const dwProtect: c_int = @bitCast(protection);
+            const BaseAddress = dll_struct.BaseAddr[sectionHeader[i].VirtualAddress..];
+            const RegionSize: usize = sectionHeader[i].SizeOfRawData;
+            var oldProt: c_int = 0;
+            _ = NtProtectVirtualMemory(-1, &BaseAddress, &RegionSize, dwProtect, &oldProt);
+        }
+        _ = NtFlushInstructionCache(-1, null, 0);
+
+        try static_tls.ldrpHandleTlsData(self, dll_struct);
+        try seh_fix.rtlInsertInvertedFunctionTable(self, dll_struct);
+
+        if (nt.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_TLS)].Size != 0) {
+            const tls_dir: *const win.IMAGE_TLS_DIRECTORY64 = @ptrCast(@alignCast(
+                base[nt.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_TLS)].VirtualAddress..],
+            ));
+            if (tls_dir.AddressOfCallBacks != 0) {
+                var p: [*]?*const types.DLLEntry = @ptrFromInt(tls_dir.AddressOfCallBacks);
+                const hinst: win.HINSTANCE = @ptrCast(base);
+                while (p[0]) |cb| : (p = p[1..]) _ = cb(hinst, win.DLL_PROCESS_ATTACH, null);
+            }
+        }
+
+        log.info16("ZLoadExeFromMemory done -> ", .{}, dll_struct.Path.shortView());
+        return dll_struct;
+    }
     pub fn ZLoadLibrary(self: *Self, libname16_: [:0]const u16) anyerror!?*Dll {
         log.setContext(logtags.RefLoad);
         defer log.rollbackContext();

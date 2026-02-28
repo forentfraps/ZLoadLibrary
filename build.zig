@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.resolveTargetQuery(.{ .os_tag = .windows });
     // const optimize = std.builtin.OptimizeMode.Debug;
     const optimize = b.standardOptimizeOption(.{});
 
