@@ -54,7 +54,7 @@ const logtags = enum {
 
 const Log = logger.SysLogger(.{
     .debug_only = true,
-    .backend = .nt_write_file,
+    .backend = .std_debug,
     .max_context_depth = 128,
 });
 
@@ -73,6 +73,7 @@ pub const Dll = struct {
     Path: *DllPath = undefined,
     ExportBase: u32 = 0,
     NumberOfFunctions: u32 = 0,
+    InitDepth: u32 = 0,
 
     const Self = @This();
 
@@ -1349,6 +1350,7 @@ pub const DllLoader = struct {
             const tls_dir: *const win.IMAGE_TLS_DIRECTORY64 = @ptrCast(@alignCast(
                 base[nt.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_TLS)].VirtualAddress..],
             ));
+
             if (tls_dir.AddressOfCallBacks != 0) {
                 var p: [*]?*const types.DLLEntry = @ptrFromInt(tls_dir.AddressOfCallBacks);
                 const hinst: win.HINSTANCE = @ptrCast(base);
@@ -1440,6 +1442,7 @@ pub const DllLoader = struct {
         };
 
         try self.resolveExportForwarders(dll_struct);
+        dll_struct.InitDepth = self.LoadDepth;
         try self.PendingInit.append(self.Allocator, dll_struct);
         _ = self.InFlight.remove(resolved.raw);
 
@@ -1594,6 +1597,7 @@ pub const DllLoader = struct {
         };
 
         try self.resolveExportForwarders(dll_struct);
+        dll_struct.InitDepth = self.LoadDepth;
         try self.PendingInit.append(self.Allocator, dll_struct);
         _ = self.InFlight.remove(key);
 
@@ -1604,6 +1608,14 @@ pub const DllLoader = struct {
         if (self.IsFlushing) return;
         self.IsFlushing = true;
         defer self.IsFlushing = false;
+
+        const Ctx = struct {
+            fn lessThan(_: void, a: *Dll, b: *Dll) bool {
+                return a.InitDepth > b.InitDepth; // descending
+            }
+        };
+        std.sort.block(*Dll, self.PendingInit.items, {}, Ctx.lessThan);
+
         var i: usize = 0;
         while (i < self.PendingInit.items.len) : (i += 1) {
             const dll_rec = self.PendingInit.items[i];

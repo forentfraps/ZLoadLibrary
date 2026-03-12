@@ -17,8 +17,8 @@ pub fn main() !void {
             dll.log.info16("Loaded dll {d}: ", .{key.key_ptr.*.len}, key.key_ptr.*);
         }
         // try test_x64dbg(allocator);
-        // try test_sxs(allocator);
-        test_sxs(allocator) catch unreachable;
+        // test_msginteral(allocator) catch unreachable;
+        try test_sxs(allocator);
         std.debug.print("Done.\n", .{});
     }
     // if (gpa.detectLeaks() != 0) {

@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     // exe_mod.link_libc = true;
     exe_mod.addIncludePath(b.path("src/Winutils/sig_headers"));
     exe_mod.strip = false;
+    exe_mod.error_tracing = true;
     exe_mod.addImport("zigwin32", zigwin32.module("win32"));
     exe_mod.addImport("syscall_manager", syscall_module);
     exe_mod.addImport("sys_logger", sys_logger_module);
