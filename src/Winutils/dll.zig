@@ -933,7 +933,12 @@ pub const DllLoader = struct {
         return nt_headers;
     }
 
-    pub fn MapSections(self: *Self, nt_headers: *align(1) const win.IMAGE_NT_HEADERS64, dll_bytes: [*]u8, delta_image_base: *usize) ![*]u8 {
+    pub fn MapSections(
+        self: *Self,
+        nt_headers: *align(1) const win.IMAGE_NT_HEADERS64,
+        dll_bytes: [*]u8,
+        delta_image_base: *isize,
+    ) ![*]u8 {
         const ntdll_dll = (try self.getDllByName("ntdll.dll"));
         const ZwAllocateVirtualMemory = try ntdll_dll.getProc(fn (i64, *?[*]u8, usize, *usize, u32, u32) callconv(.winapi) c_int, "ZwAllocateVirtualMemory");
 
@@ -951,9 +956,13 @@ pub const DllLoader = struct {
         if (status < 0 or dll_base_dirty == null) return DllError.VirtualAllocNull;
         const dll_base = dll_base_dirty.?;
         log.info("dllbase -> {*}", .{dll_base});
-        delta_image_base.* = @intFromPtr(dll_base) - nt_headers.OptionalHeader.ImageBase;
+        delta_image_base.* = @as(isize, @intCast(@intFromPtr(dll_base))) - @as(isize, @intCast(nt_headers.OptionalHeader.ImageBase));
 
-        std.mem.copyForwards(u8, dll_base[0..nt_headers.OptionalHeader.SizeOfHeaders], dll_bytes[0..nt_headers.OptionalHeader.SizeOfHeaders]);
+        std.mem.copyForwards(
+            u8,
+            dll_base[0..nt_headers.OptionalHeader.SizeOfHeaders],
+            dll_bytes[0..nt_headers.OptionalHeader.SizeOfHeaders],
+        );
 
         const section: [*]const win.IMAGE_SECTION_HEADER =
             @ptrFromInt(@intFromPtr(nt_headers) + @sizeOf(win.IMAGE_NT_HEADERS64));
@@ -969,7 +978,7 @@ pub const DllLoader = struct {
         return dll_base;
     }
 
-    pub fn ResolveRVA(dll_base: [*]u8, nt_headers: *align(1) const win.IMAGE_NT_HEADERS64, delta_image_base: usize) !void {
+    pub fn ResolveRVA(dll_base: [*]u8, nt_headers: *align(1) const win.IMAGE_NT_HEADERS64, delta_image_base: isize) !void {
         var scope = log.pushEnum(logtags.RVAres);
         defer scope.end();
 
@@ -986,7 +995,8 @@ pub const DllLoader = struct {
                 if (relocation_entries[entry_index].Type != 0) {
                     const relocation_rva: usize = relocation_block.PageAddress + relocation_entries[entry_index].Offset;
                     const ptr: *align(1) usize = @ptrCast(@alignCast(dll_base[relocation_rva..]));
-                    ptr.* = ptr.* + delta_image_base;
+                    const adjuststed_ptr = @as(isize, @intCast(ptr.*)) + delta_image_base;
+                    ptr.* = @intCast(adjuststed_ptr);
                 }
                 relocations_processed += @sizeOf(types.BASE_RELOCATION_ENTRY);
             }
@@ -1302,7 +1312,7 @@ pub const DllLoader = struct {
             return DllError.LoadFailed;
         }
 
-        var delta: usize = 0;
+        var delta: isize = 0;
         log.info16("Mapping: ", .{}, dll_struct.Path.short.z);
         const base = try self.MapSections(nt, dll_bytes, &delta);
         dll_struct.BaseAddr = base;
@@ -1424,7 +1434,7 @@ pub const DllLoader = struct {
         dll_struct.Path = dllPath;
 
         var nt = try ResolveNtHeaders(@constCast(bytes.ptr));
-        var delta: usize = 0;
+        var delta: isize = 0;
 
         log.info16("ZLoadLibraryFromMemory mapping: ", .{}, dllPath.short.z);
         const base = try self.MapSections(nt, @constCast(bytes.ptr), &delta);
@@ -1579,7 +1589,7 @@ pub const DllLoader = struct {
         defer self.Allocator.free(dll_bytes[0..dll_size]);
 
         var nt = try ResolveNtHeaders(dll_bytes);
-        var delta: usize = 0;
+        var delta: isize = 0;
         const base = try self.MapSections(nt, dll_bytes, &delta);
         dll_struct.BaseAddr = base;
         nt = try ResolveNtHeaders(base);
