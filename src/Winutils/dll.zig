@@ -939,12 +939,15 @@ pub const DllLoader = struct {
         var dll_base_dirty: ?[*]u8 = null;
         var virtAllocSize: usize = nt_headers.OptionalHeader.SizeOfImage;
 
-        var status: c_int = ZwAllocateVirtualMemory(-1, &dll_base_dirty, 0, &virtAllocSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-        if (status < 0) {
-            dll_base_dirty = null;
-            status = ZwAllocateVirtualMemory(-1, &dll_base_dirty, 0, &virtAllocSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-            if (status < 0 or dll_base_dirty == null) return DllError.VirtualAllocNull;
-        }
+        const status: c_int = ZwAllocateVirtualMemory(
+            -1,
+            &dll_base_dirty,
+            0,
+            &virtAllocSize,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_EXECUTE_READWRITE,
+        );
+        if (status < 0 or dll_base_dirty == null) return DllError.VirtualAllocNull;
         const dll_base = dll_base_dirty.?;
         log.info("dllbase -> {*}\n", .{dll_base});
         delta_image_base.* = @intFromPtr(dll_base) - nt_headers.OptionalHeader.ImageBase;
