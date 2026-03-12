@@ -25,12 +25,12 @@
     // internet connectivity.
     .dependencies = .{
         .sys_logger = .{
-            .url = "git+https://github.com/forentfraps/sys_logger.git#8e5350110028f96f382f654a91c74b86d1300790",
-            .hash = "sys_logger-0.0.0-2yVNLjAvAAA7sfCkicGWvb32wdAL6gMu2d9R5vfitnJ1",
+            .url = "git+https://github.com/forentfraps/sys_logger.git#899b2c9bc24fb73578a15579b91b66b5f87b29a3",
+            .hash = "sys_logger-0.0.0-2yVNLj9WAACOak9z2gLiywBrlhRF8qfC5fDD971JnnDX",
         },
         .syscall_manager = .{
-            .url = "git+https://github.com/forentfraps/syscall_manager.git#1a0c6d18b08062c28f8852078157474a2136dd7f",
-            .hash = "syscall_manager-0.0.0-M32ynSGyawCJaz1FfDujS-bW9oYr39UTTlDGf3VMk15S",
+            .url = "git+https://github.com/forentfraps/syscall_manager.git#2ce6ef27d1392bc51803b4ca26b795d533a4120c",
+            .hash = "syscall_manager-0.0.0-M32ynXpEAAA12BbHluYBTUCyEhdGcrgm98aB8NPRwsrx",
         },
         .zigwin32 = .{
             .url = "git+https://github.com/forentfraps/zigwin32.git#8d5ff24556250f0ecb16410e9c8af8be3933bc35",

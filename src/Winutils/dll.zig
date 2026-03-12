@@ -42,10 +42,6 @@ pub const u16HashMapType = std.HashMap([]u16, *Dll, str.MappingContext, 80);
 
 // ===== Logging =====
 
-const pref_list = [_][]const u8{ "RefLoad", "ExpTable", "ImpFix", "ImpRes", "RVAres", "HookF", "PathRes" };
-const colour = logger.SysLoggerColour;
-const colour_list = [_]colour{ colour.green, colour.blue, colour.cyan, colour.yellow, colour.pink, colour.red, colour.cyan };
-
 const logtags = enum {
     RefLoad,
     ExpTable,
@@ -55,21 +51,17 @@ const logtags = enum {
     HookF,
     PathRes,
 };
-pub const NullLogger = struct {
-    pub inline fn info(_: *@This(), comptime _: []const u8, _: anytype) void {}
-    pub inline fn info16(_: *@This(), comptime _: []const u8, _: anytype, _: []const u16) void {}
-    pub inline fn crit(_: *@This(), comptime _: []const u8, _: anytype) void {}
-    pub inline fn crit16(_: *@This(), comptime _: []const u8, _: anytype, _: []const u16) void {}
-    pub inline fn setContext(_: *@This(), _: anytype) void {}
-    pub inline fn rollbackContext(_: *@This()) void {}
-};
 
-pub var log: if (builtin.mode == .Debug) logger.SysLogger else NullLogger = undefined;
+const Log = logger.SysLogger(.{
+    .debug_only = true,
+    .backend = .nt_write_file,
+    .max_context_depth = 128,
+});
+
+pub var log: Log = undefined;
+
 pub fn init_logger_zload() void {
-    if (builtin.mode == .Debug) {
-        log = logger.SysLogger.init(colour_list.len, pref_list, colour_list);
-        log.enabled = true;
-    }
+    log = Log.init();
 }
 
 // ===== Dll record =====
@@ -133,8 +125,8 @@ pub var GLOBAL_DLL_INIT: bool = false;
 // ===== Hook stubs =====
 
 pub fn GetProcAddress(hModule: [*]u8, procname: [*:0]const u8) callconv(.winapi) ?*anyopaque {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
 
     const self = &GLOBAL_DLL_LOADER;
     const name_slice = procname[0..std.mem.len(procname)];
@@ -153,20 +145,20 @@ pub fn GetProcAddress(hModule: [*]u8, procname: [*:0]const u8) callconv(.winapi)
                 const result = d.NameExports.get(up);
                 log.crit("SafeLoad GPA '{s}' in ", .{up});
                 log.crit16("-> ", .{}, d.Path.short.z);
-                log.crit("result: {?*}\n", .{result});
+                log.crit("result: {?*}", .{result});
                 // Also print what the raw value is — forwarder string or real ptr
                 if (result) |r| {
                     const rb: [*]const u8 = @ptrCast(r);
                     if (str.looksLikeForwarderString(rb)) {
-                        log.crit("  ^ IS STILL A FORWARDER STRING: {s}\n", .{rb[0..32]});
+                        log.crit("  ^ IS STILL A FORWARDER STRING: {s}", .{rb[0..32]});
                     }
                 } else {
-                    log.crit("  ^ KEY NOT FOUND IN MAP\n", .{});
+                    log.crit("  ^ KEY NOT FOUND IN MAP", .{});
                     // Dump all keys containing "DEFAULT" for cross-check
                     var kit = d.NameExports.keyIterator();
                     while (kit.next()) |k| {
                         if (std.mem.indexOf(u8, k.*, "DEFAULT") != null)
-                            log.crit("  map has: {s}\n", .{k.*});
+                            log.crit("  map has: {s}", .{k.*});
                     }
                 }
                 return result;
@@ -176,17 +168,18 @@ pub fn GetProcAddress(hModule: [*]u8, procname: [*:0]const u8) callconv(.winapi)
         }
     }
 
-    log.crit("GPA: hModule {*} not found in LoadedDlls for '{s}'\n", .{ hModule, name_slice });
+    log.crit("GPA: hModule {*} not found in LoadedDlls for '{s}'", .{ hModule, name_slice });
     return null;
 }
 
 pub fn GetModuleHandleA(moduleName_: ?[*:0]const u8) callconv(.winapi) ?[*]u8 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
     const self = &GLOBAL_DLL_LOADER;
     if (moduleName_) |moduleName| {
         var owned = OwnedZ16.fromU8z(self.Allocator, moduleName) catch return null;
-        log.info("GMHA {s}\n", .{moduleName});
+        log.info("GMHA {s}", .{moduleName});
         defer owned.deinit();
         return GetModuleHandleW(owned.view());
     } else {
@@ -201,8 +194,9 @@ pub fn GetModuleHandleA(moduleName_: ?[*:0]const u8) callconv(.winapi) ?[*]u8 {
 }
 
 pub fn GetModuleHandleW(moduleName16_: ?[*:0]const u16) callconv(.winapi) ?[*]u8 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
     if (moduleName16_) |moduleName16| {
         const len = std.mem.len(moduleName16) + 1;
         const self = &GLOBAL_DLL_LOADER;
@@ -235,9 +229,10 @@ pub fn GetModuleHandleW(moduleName16_: ?[*:0]const u16) callconv(.winapi) ?[*]u8
 }
 
 pub fn LoadLibraryA_stub(libname: [*:0]const u8) callconv(.winapi) ?[*]u8 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
-    log.info("LLA {s}\n", .{libname});
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
+    log.info("LLA {s}", .{libname});
     const self = &GLOBAL_DLL_LOADER;
     var name16 = OwnedZ16.fromU8z(self.Allocator, libname) catch return null;
     defer name16.deinit();
@@ -245,9 +240,10 @@ pub fn LoadLibraryA_stub(libname: [*:0]const u8) callconv(.winapi) ?[*]u8 {
 }
 
 pub fn LoadLibraryW_stub(libname16: [*:0]u16) callconv(.winapi) ?[*]u8 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
-    log.info16("LLW\n", .{}, @ptrCast(libname16[0..std.mem.len(libname16)]));
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
+    log.info16("LLW", .{}, @ptrCast(libname16[0..std.mem.len(libname16)]));
     const d = (&GLOBAL_DLL_LOADER).ZLoadLibrary(@ptrCast(libname16[0..std.mem.len(libname16)])) catch return null;
     if (d) |dll| return dll.BaseAddr;
     return null;
@@ -256,9 +252,10 @@ pub fn LoadLibraryW_stub(libname16: [*:0]u16) callconv(.winapi) ?[*]u8 {
 pub fn LoadLibraryExA_stub(libname: [*:0]const u8, file: ?*anyopaque, flags: u32) callconv(.winapi) ?[*]u8 {
     _ = file;
     _ = flags;
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
-    log.info("LLEA {s}\n", .{libname});
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
+    log.info("LLEA {s}", .{libname});
     const self = &GLOBAL_DLL_LOADER;
     var name16 = OwnedZ16.fromU8z(self.Allocator, libname) catch return null;
     defer name16.deinit();
@@ -266,11 +263,12 @@ pub fn LoadLibraryExA_stub(libname: [*:0]const u8, file: ?*anyopaque, flags: u32
 }
 
 pub fn LoadLibraryExW_stub(libname16: [*:0]u16, file: ?*anyopaque, flags: u32) callconv(.winapi) ?[*]u8 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
     log.info16("LLEW ", .{}, @ptrCast(libname16[0..std.mem.len(libname16)]));
-    if (file) |file_deref| log.info("File ptr: {*}\n", .{file_deref});
-    log.info("Flags : {x}\n", .{flags});
+    if (file) |file_deref| log.info("File ptr: {*}", .{file_deref});
+    log.info("Flags : {x}", .{flags});
     const self = &GLOBAL_DLL_LOADER;
     const key: []u16 = libname16[0..std.mem.len(libname16)];
     if (self.LoadedDlls.contains(key)) return self.LoadedDlls.get(key).?.BaseAddr;
@@ -290,8 +288,9 @@ pub fn ResolveDelayLoadedAPI_stub(
     _ = failure_dll_hook;
     _ = failure_hook;
     _ = flags;
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
     const self = &GLOBAL_DLL_LOADER;
     const lib_u8z: [*:0]const u8 = @ptrCast(parent_base[descriptor.DllNameRVA..]);
     var owned = OwnedZ16.fromU8z(self.Allocator, lib_u8z) catch return null;
@@ -336,8 +335,9 @@ pub fn GetModuleFileNameW_stub(
     lpFilename: [*]u16,
     nSize: u32,
 ) callconv(.winapi) u32 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
     const self = &GLOBAL_DLL_LOADER;
     if (hModule) |base| {
         var it = self.LoadedDlls.valueIterator();
@@ -378,8 +378,9 @@ pub fn GetModuleHandleExW_stub(
     lpModuleName: ?*anyopaque,
     phModule: *?[*]u8,
 ) callconv(.winapi) i32 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
     const self = &GLOBAL_DLL_LOADER;
     if (dwFlags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS != 0) {
         const addr = @intFromPtr(lpModuleName);
@@ -407,8 +408,9 @@ pub fn GetModuleHandleExA_stub(
     lpModuleName: ?*anyopaque,
     phModule: *?[*]u8,
 ) callconv(.winapi) i32 {
-    log.setContext(logtags.HookF);
-    defer log.rollbackContext();
+    var scope = log.pushEnum(logtags.HookF);
+    defer scope.end();
+
     if (dwFlags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS != 0) {
         return GetModuleHandleExW_stub(dwFlags, lpModuleName, phModule);
     }
@@ -508,7 +510,6 @@ pub const DllLoader = struct {
             const d = dll_ptr.*;
 
             // Free NameExports — keys were heap-allocated by toUpperOwned
-            // log.info16("Freeing dll: ", .{}, d.Path.short.z);
             var key_it = d.NameExports.keyIterator();
             while (key_it.next()) |k| self.Allocator.free(k.*);
             d.NameExports.deinit();
@@ -624,12 +625,12 @@ pub const DllLoader = struct {
 
     pub fn ResolveExports(self: *Self, dll_rec: *Dll) !void {
         // All allocations here are permanent
-        log.setContext(logtags.ExpTable);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.ExpTable);
+        defer scope.end();
 
         const bytes = dll_rec.BaseAddr;
         const dos: *win.IMAGE_DOS_HEADER = @ptrCast(@alignCast(bytes));
-        const nt: *const win.IMAGE_NT_HEADERS64 = @ptrCast(@alignCast(bytes[@intCast(dos.e_lfanew)..]));
+        const nt: *align(1) const win.IMAGE_NT_HEADERS64 = @ptrCast(@alignCast(bytes[@intCast(dos.e_lfanew)..]));
         const dir: win.IMAGE_DATA_DIRECTORY = nt.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_EXPORT)];
         dll_rec.NameExports = std.StringHashMap(*anyopaque).init(self.Allocator);
         dll_rec.OrdinalExports = std.AutoHashMap(u16, *anyopaque).init(self.Allocator);
@@ -702,7 +703,7 @@ pub const DllLoader = struct {
             var buf: [256]u8 = undefined;
             const up = toUpperTemp(&buf, sym);
             return dep.ResolveByName(up) orelse {
-                log.crit("FUNCTION THAT FAILED TO RESOLVE: {s} FWD -> {s}\n", .{ up, fwd });
+                log.crit("FUNCTION THAT FAILED TO RESOLVE: {s} FWD -> {s}", .{ up, fwd });
                 log.crit16("Master dll: ", .{}, targetPath.short.z);
                 return error.FuncResolutionByNameFailed;
             };
@@ -710,8 +711,8 @@ pub const DllLoader = struct {
     }
 
     pub fn resolveExportForwarders(self: *Self, dll_rec: *Dll) !void {
-        log.setContext(logtags.ExpTable);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.ExpTable);
+        defer scope.end();
 
         var name_it = dll_rec.NameExports.iterator();
         while (name_it.next()) |entry| {
@@ -719,7 +720,7 @@ pub const DllLoader = struct {
             if (!looksLikeForwarderString(ptr)) continue;
             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(ptr)), 0);
             const resolved = self.resolveForwarder(fwd_slice, dll_rec.Path) catch |err| {
-                log.crit("  failed: {}\n", .{err});
+                log.crit("  failed: {}", .{err});
                 continue;
             };
             entry.value_ptr.* = resolved;
@@ -731,7 +732,7 @@ pub const DllLoader = struct {
             if (!looksLikeForwarderString(ptr)) continue;
             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(ptr)), 0);
             const resolved = self.resolveForwarder(fwd_slice, dll_rec.Path) catch |err| {
-                log.crit("  failed: {}\n", .{err});
+                log.crit("  failed: {}", .{err});
                 continue;
             };
             entry.value_ptr.* = resolved;
@@ -750,8 +751,8 @@ pub const DllLoader = struct {
     }
 
     pub fn getDllPaths(self: *Self, libname16_: [:0]const u16) !?*DllPath {
-        log.setContext(logtags.PathRes);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.PathRes);
+        defer scope.end();
 
         const kernel32 = (try self.getDllByName("kernel32.dll"));
         const GetFileAttributesW = try kernel32.getProc(fn ([*:0]u16) callconv(.winapi) c_int, "GetFileAttributesW");
@@ -892,7 +893,6 @@ pub const DllLoader = struct {
                 _ = GetFileAttributesW(tmp_z.ptr);
                 const err: c_int = GetLastError();
                 if (err == 0) {
-                    // log.info16("Found ", .{}, tmp_z);
                     return try makePath(self.Allocator, tmp_z);
                 }
 
@@ -924,15 +924,15 @@ pub const DllLoader = struct {
         return dll_bytes;
     }
 
-    pub fn ResolveNtHeaders(dll_bytes: [*]u8) !*const win.IMAGE_NT_HEADERS64 {
-        const dos_headers: *win.IMAGE_DOS_HEADER = @ptrCast(@alignCast(dll_bytes));
-        const nt_headers: *const win.IMAGE_NT_HEADERS64 =
+    pub fn ResolveNtHeaders(dll_bytes: [*]u8) !*align(1) const win.IMAGE_NT_HEADERS64 {
+        const dos_headers: *align(1) win.IMAGE_DOS_HEADER = @ptrCast(@alignCast(dll_bytes));
+        const nt_headers: *align(1) const win.IMAGE_NT_HEADERS64 =
             @ptrCast(@alignCast(dll_bytes[@intCast(dos_headers.e_lfanew)..]));
         if (nt_headers.Signature != 0x4550) return error.InvalidPESignature;
         return nt_headers;
     }
 
-    pub fn MapSections(self: *Self, nt_headers: *const win.IMAGE_NT_HEADERS64, dll_bytes: [*]u8, delta_image_base: *usize) ![*]u8 {
+    pub fn MapSections(self: *Self, nt_headers: *align(1) const win.IMAGE_NT_HEADERS64, dll_bytes: [*]u8, delta_image_base: *usize) ![*]u8 {
         const ntdll_dll = (try self.getDllByName("ntdll.dll"));
         const ZwAllocateVirtualMemory = try ntdll_dll.getProc(fn (i64, *?[*]u8, usize, *usize, u32, u32) callconv(.winapi) c_int, "ZwAllocateVirtualMemory");
 
@@ -949,7 +949,7 @@ pub const DllLoader = struct {
         );
         if (status < 0 or dll_base_dirty == null) return DllError.VirtualAllocNull;
         const dll_base = dll_base_dirty.?;
-        log.info("dllbase -> {*}\n", .{dll_base});
+        log.info("dllbase -> {*}", .{dll_base});
         delta_image_base.* = @intFromPtr(dll_base) - nt_headers.OptionalHeader.ImageBase;
 
         std.mem.copyForwards(u8, dll_base[0..nt_headers.OptionalHeader.SizeOfHeaders], dll_bytes[0..nt_headers.OptionalHeader.SizeOfHeaders]);
@@ -968,8 +968,10 @@ pub const DllLoader = struct {
         return dll_base;
     }
 
-    pub fn ResolveRVA(dll_base: [*]u8, nt_headers: *const win.IMAGE_NT_HEADERS64, delta_image_base: usize) !void {
-        log.setContext(logtags.RVAres);
+    pub fn ResolveRVA(dll_base: [*]u8, nt_headers: *align(1) const win.IMAGE_NT_HEADERS64, delta_image_base: usize) !void {
+        var scope = log.pushEnum(logtags.RVAres);
+        defer scope.end();
+
         const relocations = nt_headers.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_BASERELOC)];
         const relocation_table: [*]u8 = @ptrCast(@alignCast(dll_base[relocations.VirtualAddress..]));
         var relocations_processed: u32 = 0;
@@ -988,12 +990,11 @@ pub const DllLoader = struct {
                 relocations_processed += @sizeOf(types.BASE_RELOCATION_ENTRY);
             }
         }
-        log.rollbackContext();
     }
 
-    pub fn ResolveImportTable(self: *Self, dll_base: [*]u8, nt_headers: *const win.IMAGE_NT_HEADERS64, dllPath: *DllPath, dll_struct: *Dll) !void {
-        log.setContext(logtags.ImpRes);
-        defer log.rollbackContext();
+    pub fn ResolveImportTable(self: *Self, dll_base: [*]u8, nt_headers: *align(1) const win.IMAGE_NT_HEADERS64, dllPath: *DllPath, dll_struct: *Dll) !void {
+        var scope = log.pushEnum(logtags.ImpRes);
+        defer scope.end();
 
         const impdir = nt_headers.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_IMPORT)];
         if (impdir.Size == 0) return;
@@ -1024,7 +1025,6 @@ pub const DllLoader = struct {
             if (std.mem.eql(u16, dllPath.shortKey(), libraryNameToLoad16.raw)) {
                 library = dll_struct;
             } else {
-                // log.info16("Trying to load ", .{}, libraryNameToLoad16.z);
                 library = try self.ZLoadLibrary(libraryNameToLoad16.z);
                 if (library == null) {
                     log.crit16("Failed to resolve DURING IMOPRTS: ", .{}, libraryNameToLoad16.z);
@@ -1053,8 +1053,6 @@ pub const DllLoader = struct {
                         if (looksLikeForwarderString(addr_bytes)) {
                             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(addr)), 0);
                             addr = try self.resolveForwarder(fwd_slice, dllPath);
-                            // log.crit("FWD to resolve {s}\n", .{fwd_slice});
-                            // log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
                         }
                         thunk.u1.Function = @intFromPtr(addr);
                     } else {
@@ -1065,8 +1063,6 @@ pub const DllLoader = struct {
                         const addr_bytes: [*]const u8 = @ptrCast(addr);
                         if (looksLikeForwarderString(addr_bytes)) {
                             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(addr)), 0);
-                            // log.crit("FWD to resolve {s}\n", .{fwd_slice});
-                            // log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
                             addr = try self.resolveForwarder(fwd_slice, dllPath);
                         }
                         thunk.u1.Function = @intFromPtr(addr);
@@ -1076,9 +1072,9 @@ pub const DllLoader = struct {
         }
     }
 
-    pub fn fixDelayImports(self: *@This(), dll_base: [*]u8, nt_headers: *const win.IMAGE_NT_HEADERS64, dllPath: *DllPath, dll_struct: *Dll) !void {
-        log.setContext(logtags.ImpRes);
-        defer log.rollbackContext();
+    pub fn fixDelayImports(self: *@This(), dll_base: [*]u8, nt_headers: *align(1) const win.IMAGE_NT_HEADERS64, dllPath: *DllPath, dll_struct: *Dll) !void {
+        var scope = log.pushEnum(logtags.ImpRes);
+        defer scope.end();
 
         const delaydir = nt_headers.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT)];
         if (delaydir.Size == 0) return;
@@ -1161,8 +1157,9 @@ pub const DllLoader = struct {
 
     pub fn PatchExportTableLoaderStubs(self: *Self, dll_rec: *Dll) !void {
         _ = self;
-        log.setContext(logtags.ImpFix);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.ImpFix);
+        defer scope.end();
+
         var tmp: [32]u8 = undefined;
 
         const k1 = toUpperTemp(&tmp, "GetProcAddress");
@@ -1191,7 +1188,7 @@ pub const DllLoader = struct {
         if (dll_rec.NameExports.getPtr(k13)) |vp| vp.* = @ptrCast(@constCast(&GetModuleHandleExA_stub));
     }
 
-    pub fn IMAGE_FIRST_SECTION(nt_headers: *const win.IMAGE_NT_HEADERS64) [*]const win.IMAGE_SECTION_HEADER {
+    pub fn IMAGE_FIRST_SECTION(nt_headers: *align(1) const win.IMAGE_NT_HEADERS64) [*]const win.IMAGE_SECTION_HEADER {
         const OptionalHeader: [*]const u8 = @ptrCast(&nt_headers.OptionalHeader);
         const SizeOfOptionalHeader: usize = nt_headers.FileHeader.SizeOfOptionalHeader;
         return @ptrCast(@alignCast(OptionalHeader[SizeOfOptionalHeader..]));
@@ -1271,16 +1268,16 @@ pub const DllLoader = struct {
             const dll_entry: ?*const types.DLLEntry = @ptrCast(dll_rec.BaseAddr[nt_headers.OptionalHeader.AddressOfEntryPoint..]);
             if (dll_entry) |run| {
                 const hinst: win.HINSTANCE = @ptrCast(dll_rec.BaseAddr);
-                log.info("Starting DLLMain\n", .{});
+                log.info("Starting DLLMain", .{});
                 const dllmain_result = run(hinst, 1, null);
-                log.info("Out of dllmain -> {}\n", .{dllmain_result});
+                log.info("Out of dllmain -> {}", .{dllmain_result});
             }
         }
     }
 
     pub fn ZLoadExe(self: *Self, libname16_: [:0]const u16) anyerror!?*Dll {
-        log.setContext(logtags.RefLoad);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.RefLoad);
+        defer scope.end();
 
         var resolved = try OwnedZ16.fromU16(self.Allocator, libname16_);
         defer resolved.deinit();
@@ -1300,7 +1297,7 @@ pub const DllLoader = struct {
         var nt = try ResolveNtHeaders(dll_bytes);
 
         if (nt.FileHeader.Characteristics.DLL != 0) {
-            log.crit("ZLoadExe: target is a DLL not an EXE\n", .{});
+            log.crit("ZLoadExe: target is a DLL not an EXE", .{});
             return DllError.LoadFailed;
         }
 
@@ -1373,6 +1370,7 @@ pub const DllLoader = struct {
         log.info16("Jumping to EXE entrypoint ->", .{}, exe.Path.shortView());
         ep();
     }
+
     fn makeDllPathFromName(self: *Self, name16: [:0]const u16) !*DllPath {
         var full_owned = try OwnedZ16.fromU16(self.Allocator, name16[0 .. name16.len + 1]);
         errdefer full_owned.deinit();
@@ -1389,8 +1387,8 @@ pub const DllLoader = struct {
         dll_name16: [:0]const u16,
         bytes: []const u8,
     ) anyerror!?*Dll {
-        log.setContext(logtags.RefLoad);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.RefLoad);
+        defer scope.end();
 
         var resolved = try OwnedZ16.fromU16(self.Allocator, dll_name16[0 .. dll_name16.len + 1]);
         defer resolved.deinit();
@@ -1437,7 +1435,7 @@ pub const DllLoader = struct {
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
 
         self.ResolveImportTable(base, nt, dllPath, dll_struct) catch |e| {
-            log.crit("ZLoadLibraryFromMemory: import resolution failed: {}\n", .{e});
+            log.crit("ZLoadLibraryFromMemory: import resolution failed: {}", .{e});
             return e;
         };
 
@@ -1453,8 +1451,8 @@ pub const DllLoader = struct {
         exe_name16: [:0]const u16,
         bytes: []const u8,
     ) anyerror!?*Dll {
-        log.setContext(logtags.RefLoad);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.RefLoad);
+        defer scope.end();
 
         var resolved = try OwnedZ16.fromU16(self.Allocator, exe_name16[0 .. exe_name16.len + 1]);
         defer resolved.deinit();
@@ -1462,7 +1460,7 @@ pub const DllLoader = struct {
 
         var nt = try ResolveNtHeaders(@constCast(bytes.ptr));
         if (nt.FileHeader.Characteristics.DLL != 0) {
-            log.crit("ZLoadExeFromMemory: supplied image is a DLL, not an EXE\n", .{});
+            log.crit("ZLoadExeFromMemory: supplied image is a DLL, not an EXE", .{});
             return DllError.LoadFailed;
         }
 
@@ -1530,9 +1528,10 @@ pub const DllLoader = struct {
         log.info16("ZLoadExeFromMemory done -> ", .{}, dll_struct.Path.shortView());
         return dll_struct;
     }
+
     pub fn ZLoadLibrary(self: *Self, libname16_: [:0]const u16) anyerror!?*Dll {
-        log.setContext(logtags.RefLoad);
-        defer log.rollbackContext();
+        var scope = log.pushEnum(logtags.RefLoad);
+        defer scope.end();
 
         var resolved = try OwnedZ16.fromU16(self.Allocator, libname16_);
         defer resolved.deinit();
@@ -1588,7 +1587,7 @@ pub const DllLoader = struct {
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
         self.ResolveImportTable(base, nt, dllPath, dll_struct) catch |e| {
             log.crit(
-                "Failed to resolve imports {}\n",
+                "Failed to resolve imports {}",
                 .{e},
             );
             return e;
@@ -1596,12 +1595,11 @@ pub const DllLoader = struct {
 
         try self.resolveExportForwarders(dll_struct);
         try self.PendingInit.append(self.Allocator, dll_struct);
-        // log.info16("executing ", .{}, dll_struct.Path.shortView());
-        // try self.ExecuteDll(dll_struct);
         _ = self.InFlight.remove(key);
 
         return dll_struct;
     }
+
     pub fn FlushPendingInits(self: *Self) !void {
         if (self.IsFlushing) return;
         self.IsFlushing = true;

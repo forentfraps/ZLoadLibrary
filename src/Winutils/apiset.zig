@@ -3,12 +3,6 @@ const win = @import("zigwin32").everything;
 const clr = @import("clr.zig");
 const sneaky_memory = @import("memory.zig");
 const dll = @import("dll.zig");
-const SysLogger = @import("sys_logger").SysLogger;
-const NullLogger = @import("dll.zig").NullLogger;
-const builtin = @import("builtin");
-
-pub var log: if (builtin.mode == .Debug) SysLogger else NullLogger = undefined;
-const print = std.debug.print;
 
 // --- your structs kept as-is ---
 const ApiSetNamespaceHeader = struct {
@@ -80,7 +74,7 @@ fn isDigits16(s: []const u16) bool {
     return true;
 }
 
-// Build “rev->-0” candidate (no alloc; returns slice into stack buf)
+// Build "rev->-0" candidate (no alloc; returns slice into stack buf)
 fn makeRevNumCandidate(base: []const u16, out: []u16, num: u8) []const u16 {
     if (lastHyphenIndex(base)) |idx| {
         const tail = if (idx + 1 <= base.len) base[idx + 1 ..] else &[_]u16{};
@@ -93,7 +87,7 @@ fn makeRevNumCandidate(base: []const u16, out: []u16, num: u8) []const u16 {
     return &[_]u16{};
 }
 
-// Take “contract root” (drop last “-<rev>” entirely)
+// Take "contract root" (drop last "-<rev>" entirely)
 fn makeContractRoot(base: []const u16) []const u16 {
     if (lastHyphenIndex(base)) |idx| {
         const tail = if (idx + 1 <= base.len) base[idx + 1 ..] else &[_]u16{};
@@ -120,7 +114,7 @@ fn slice16At(base: *const anyopaque, byte_off: u32, byte_len: u32) []const u16 {
 
 // -------------- quick prefix check (yours, but safer) --------------
 pub fn checkApiSet(dllname: []const u16) bool {
-    if (dllname.len < 11) return false; //
+    if (dllname.len < 11) return false;
     // Case-insensitive check for "API-" or "EXT-"
     const p1 = "API-"[0..];
     const p2 = "EXT-"[0..];
@@ -147,7 +141,6 @@ pub fn checkApiSet(dllname: []const u16) bool {
 // ---------------- adapted resolver (minimal change) ----------------
 
 pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16) ?[]u16 {
-    log = dll.log;
     if (!checkApiSet(apiset_name_in)) return null;
 
     const ApiSetMap: *ApiSetNamespaceHeader = asm volatile (
@@ -159,7 +152,7 @@ pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16
         : "memory");
 
     if (ApiSetMap.version < 6 or ApiSetMap.count == 0) {
-        log.crit16("BAD API VERSION OR NO MAPS", .{}, apiset_name_in);
+        dll.log.crit16("BAD API VERSION OR NO MAPS", .{}, apiset_name_in);
         return null;
     }
 
@@ -245,7 +238,7 @@ pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16
         if (h < target_hash) lo = mid + 1 else hi = mid;
     }
     if (lo == count or hashEntryArray[lo].hash != target_hash) {
-        log.crit16("Did not find an entry ", .{}, apiset_name_in);
+        dll.log.crit16("Did not find an entry ", .{}, apiset_name_in);
         return null;
     }
 
@@ -270,12 +263,12 @@ pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16
     }
 
     const e = found orelse {
-        log.crit16("Did not find an entry ", .{}, apiset_name_in);
+        dll.log.crit16("Did not find an entry ", .{}, apiset_name_in);
         return null;
     };
 
     if (e.hostCount == 0) {
-        log.crit16("HOST COUNT 0", .{}, apiset_name_in);
+        dll.log.crit16("HOST COUNT 0", .{}, apiset_name_in);
         return null;
     }
 
@@ -301,7 +294,6 @@ pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16
         var blacklisted = false;
         for (blacklist) |bl| {
             if (matchBlacklistEntry(host_name, bl)) {
-                // log.info("ApiSetResolve: skipping blacklisted host (entry {d})\n", .{i});
                 blacklisted = true;
                 break;
             }
@@ -314,6 +306,6 @@ pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16
     if (best) |result| return result;
 
     // All hosts were blacklisted — caller should treat this as "no resolution"
-    log.crit16("ApiSetResolve: all hosts blacklisted for ", .{}, apiset_name_in);
+    dll.log.crit16("ApiSetResolve: all hosts blacklisted for ", .{}, apiset_name_in);
     return null;
 }
