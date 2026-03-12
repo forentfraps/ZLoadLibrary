@@ -1487,7 +1487,7 @@ pub const DllLoader = struct {
         errdefer self.Allocator.destroy(dll_struct);
         dll_struct.Path = dllPath;
 
-        var delta: usize = 0;
+        var delta: isize = 0;
         log.info16("ZLoadExeFromMemory mapping: ", .{}, dllPath.short.z);
         const base = try self.MapSections(nt, @constCast(bytes.ptr), &delta);
         dll_struct.BaseAddr = base;
@@ -1619,12 +1619,12 @@ pub const DllLoader = struct {
         self.IsFlushing = true;
         defer self.IsFlushing = false;
 
-        const Ctx = struct {
-            fn lessThan(_: void, a: *Dll, b: *Dll) bool {
-                return a.InitDepth > b.InitDepth; // descending
-            }
-        };
-        std.sort.block(*Dll, self.PendingInit.items, {}, Ctx.lessThan);
+        // const Ctx = struct {
+        //     fn lessThan(_: void, a: *Dll, b: *Dll) bool {
+        //         return a.InitDepth > b.InitDepth; // descending
+        //     }
+        // };
+        // std.sort.block(*Dll, self.PendingInit.items, {}, Ctx.lessThan);
 
         var i: usize = 0;
         while (i < self.PendingInit.items.len) : (i += 1) {
