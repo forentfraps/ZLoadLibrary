@@ -189,8 +189,8 @@ pub fn GetModuleHandleA(moduleName_: ?[*:0]const u8) callconv(.winapi) ?[*]u8 {
             : [peb] "={rax}" (-> usize),
             :
             : .{ .memory = true });
-        const addr: [*]u8 = @ptrFromInt(peb + 0x10);
-        return addr;
+        const addr: *[*]u8 = @ptrFromInt(peb + 0x10);
+        return addr.*;
     }
 }
 
