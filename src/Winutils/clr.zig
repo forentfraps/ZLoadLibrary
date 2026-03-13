@@ -45,7 +45,7 @@ pub fn print16(s: anytype) void {
         const c: u8 = @intCast(s[i]);
         std.debug.print("{c}", .{c});
     }
-    std.debug.print("\n", .{});
+    std.debug.print("", .{});
 }
 
 pub fn getShortName(s: [:0]u16) [:0]u16 {

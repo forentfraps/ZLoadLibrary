@@ -10,25 +10,6 @@ const PEB = types.PEB;
 const RTL_INVERTED_FUNCTION_TABLE = types.RTL_INVERTED_FUNCTION_TABLE;
 const RTL_INVERTED_FUNCTION_TABLE_ENTRY = types.RTL_INVERTED_FUNCTION_TABLE_ENTRY;
 
-// ===== ntdll imports =====
-
-extern "ntdll" fn RtlUpcaseUnicodeChar(c: u16) callconv(.winapi) u16;
-
-// ===== System VirtualProtect / RtlAddFunctionTable (used only inside this file) =====
-
-extern "kernel32" fn VirtualProtect(
-    lpAddress: ?*anyopaque,
-    dwSize: usize,
-    flNewProtect: u32,
-    lpflOldProtect: *u32,
-) callconv(.winapi) i32;
-
-extern "kernel32" fn RtlAddFunctionTable(
-    table: [*]win.IMAGE_RUNTIME_FUNCTION_ENTRY,
-    entry_count: u32,
-    base_address: usize,
-) callconv(.winapi) i32;
-
 // ===== getNtdllBase =====
 
 pub fn getNtdllBase() ?[*]u8 {
@@ -65,30 +46,6 @@ pub fn getNtdllBase() ?[*]u8 {
         if (curr == head) break;
     }
     return null;
-}
-
-// ===== LdrpHashUnicodeString =====
-
-pub fn LdrpHashUnicodeString(us_opt: ?*const UNICODE_STRING) u64 {
-    var h: u32 = 0;
-    if (us_opt == null) return 0x8000_0000;
-    const us = us_opt.?;
-    const len_chars: usize = us.Length >> 1;
-    const p0: [*]const u16 = @ptrCast(us.Buffer orelse return 0x8000_0000);
-    var i: usize = 0;
-    var p = p0;
-    while (i < len_chars) : (i += 1) {
-        var ch: u16 = p[0];
-        p += 1;
-        if (ch >= 'a' and ch <= 'z') {
-            ch -= 32;
-        } else if (ch >= 0x00C0) {
-            ch = RtlUpcaseUnicodeChar(ch);
-        }
-        const t: u64 = @as(u64, h) * 65599 + @as(u64, ch);
-        h = @truncate(t);
-    }
-    return if (h != 0) @as(u64, h) else 0x8000_0000;
 }
 
 pub inline fn ldrBucketIndex(hash: u64) usize {
@@ -131,29 +88,3 @@ pub inline fn insertTailList(head: *win.LIST_ENTRY, node: *win.LIST_ENTRY) void 
 }
 
 // ===== findLdrpHashTableBase =====
-
-pub fn findLdrpHashTableBase() ?[*]win.LIST_ENTRY {
-    const peb: *PEB = asm volatile ("mov %gs:0x60, %rax"
-        : [peb] "={rax}" (-> *PEB),
-        :
-        : .{ .memory = true });
-    const head: *win.LIST_ENTRY = &peb.Ldr.InInitializationOrderModuleList;
-    var cur: *win.LIST_ENTRY = head.Flink;
-    var cap: usize = 0;
-
-    while (cap < 2048) : (cap += 1) {
-        const e: *LDR_DATA_TABLE_ENTRY_FULL =
-            @fieldParentPtr("InInitializationOrderLinks", cur);
-        cur = cur.Flink;
-
-        if (e.HashLinks.Flink == &e.HashLinks) continue;
-        const h = LdrpHashUnicodeString(&e.BaseDllName);
-        const idx = ldrBucketIndex(h);
-        const list_after_head = e.HashLinks.Flink;
-        const table0: [*]win.LIST_ENTRY = @ptrFromInt(
-            @intFromPtr(list_after_head) - idx * @sizeOf(win.LIST_ENTRY),
-        );
-        return table0;
-    }
-    return null;
-}

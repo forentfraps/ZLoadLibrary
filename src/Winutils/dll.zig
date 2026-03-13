@@ -54,8 +54,8 @@ const logtags = enum {
 
 const Log = logger.SysLogger(.{
     .debug_only = true,
-    .backend = .std_debug,
-    .max_context_depth = 128,
+    .backend = .nt_write_file,
+    .max_context_depth = 1280,
 });
 
 pub var log: Log = undefined;
@@ -953,7 +953,7 @@ pub const DllLoader = struct {
             MEM_RESERVE | MEM_COMMIT,
             PAGE_EXECUTE_READWRITE,
         );
-        if (status < 0 or dll_base_dirty == null) return DllError.VirtualAllocNull;
+        if (status != 0 or dll_base_dirty == null) return DllError.VirtualAllocNull;
         const dll_base = dll_base_dirty.?;
         log.info("dllbase -> {*}", .{dll_base});
         delta_image_base.* = @as(isize, @intCast(@intFromPtr(dll_base))) - @as(isize, @intCast(nt_headers.OptionalHeader.ImageBase));
@@ -1036,6 +1036,7 @@ pub const DllLoader = struct {
             if (std.mem.eql(u16, dllPath.shortKey(), libraryNameToLoad16.raw)) {
                 library = dll_struct;
             } else {
+                // log.info16("Trying to load ", .{}, libraryNameToLoad16.z);
                 library = try self.ZLoadLibrary(libraryNameToLoad16.z);
                 if (library == null) {
                     log.crit16("Failed to resolve DURING IMOPRTS: ", .{}, libraryNameToLoad16.z);
@@ -1064,6 +1065,8 @@ pub const DllLoader = struct {
                         if (looksLikeForwarderString(addr_bytes)) {
                             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(addr)), 0);
                             addr = try self.resolveForwarder(fwd_slice, dllPath);
+                            // log.crit("FWD to resolve {s}", .{fwd_slice});
+                            // log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
                         }
                         thunk.u1.Function = @intFromPtr(addr);
                     } else {
@@ -1074,6 +1077,8 @@ pub const DllLoader = struct {
                         const addr_bytes: [*]const u8 = @ptrCast(addr);
                         if (looksLikeForwarderString(addr_bytes)) {
                             const fwd_slice = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(addr)), 0);
+                            // log.crit("FWD to resolve {s}", .{fwd_slice});
+                            // log.crit16("FROM MODULE ", .{}, libraryNameToLoad16.raw);
                             addr = try self.resolveForwarder(fwd_slice, dllPath);
                         }
                         thunk.u1.Function = @intFromPtr(addr);
@@ -1207,10 +1212,22 @@ pub const DllLoader = struct {
 
     pub fn ExecuteDll(self: *Self, dll_rec: *Dll) !void {
         const kernel32 = try self.getDllByName("kernel32.dll");
-        const CreateActCtxW = try kernel32.getProc(fn (*anyopaque) callconv(.winapi) ?*anyopaque, "CreateActCtxW");
-        const ActivateActCtx = try kernel32.getProc(fn (?*anyopaque, *usize) callconv(.winapi) i32, "ActivateActCtx");
-        const DeactivateActCtx = try kernel32.getProc(fn (u32, usize) callconv(.winapi) i32, "DeactivateActCtx");
-        const ReleaseActCtx = try kernel32.getProc(fn (?*anyopaque) callconv(.winapi) void, "ReleaseActCtx");
+        const CreateActCtxW = try kernel32.getProc(
+            fn (*anyopaque) callconv(.winapi) ?*anyopaque,
+            "CreateActCtxW",
+        );
+        const ActivateActCtx = try kernel32.getProc(
+            fn (?*anyopaque, *usize) callconv(.winapi) i32,
+            "ActivateActCtx",
+        );
+        const DeactivateActCtx = try kernel32.getProc(
+            fn (u32, usize) callconv(.winapi) i32,
+            "DeactivateActCtx",
+        );
+        const ReleaseActCtx = try kernel32.getProc(
+            fn (?*anyopaque) callconv(.winapi) void,
+            "ReleaseActCtx",
+        );
 
         const ACTCTXW = extern struct {
             cbSize: u32,
@@ -1229,7 +1246,7 @@ pub const DllLoader = struct {
         var ctx = std.mem.zeroes(ACTCTXW);
         ctx.cbSize = @sizeOf(ACTCTXW);
         ctx.dwFlags = 0x80 | 0x20; // HMODULE_VALID | RESOURCE_NAME_VALID
-        ctx.lpResourceName = @ptrFromInt(2); // ID 2 for DLLs — plugin/isolation context
+        ctx.lpResourceName = @ptrFromInt(2); // ID 2 for DLLs - plugin/isolation context
         ctx.hModule = dll_rec.BaseAddr;
 
         const INVALID_HANDLE: usize = ~@as(usize, 0);
@@ -1261,7 +1278,7 @@ pub const DllLoader = struct {
         }
 
         _ = NtFlushInstructionCache(-1, null, 0);
-        try static_tls.ldrpHandleTlsData(self, dll_rec);
+        // try static_tls.ldrpHandleTlsData(self, dll_rec);
         try seh_fix.rtlInsertInvertedFunctionTable(self, dll_rec);
 
         if (nt_headers.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_TLS)].Size != 0) {
@@ -1619,12 +1636,21 @@ pub const DllLoader = struct {
         self.IsFlushing = true;
         defer self.IsFlushing = false;
 
-        // const Ctx = struct {
-        //     fn lessThan(_: void, a: *Dll, b: *Dll) bool {
-        //         return a.InitDepth > b.InitDepth; // descending
-        //     }
-        // };
-        // std.sort.block(*Dll, self.PendingInit.items, {}, Ctx.lessThan);
+        // Pass 1: set up and zero TLS blocks for every pending DLL
+        // before any DllMain can call cross-module TLS accessors
+        for (self.PendingInit.items) |dll_rec| {
+            static_tls.ldrpHandleTlsData(self, dll_rec) catch |err| {
+                log.crit("TLS pass failed for dll: {}", .{err});
+            };
+        }
+
+        // Pass 2: execute DllMains in dependency order (deepest first)
+        const Ctx = struct {
+            fn lessThan(_: void, a: *Dll, b: *Dll) bool {
+                return a.InitDepth > b.InitDepth;
+            }
+        };
+        std.sort.block(*Dll, self.PendingInit.items, {}, Ctx.lessThan);
 
         var i: usize = 0;
         while (i < self.PendingInit.items.len) : (i += 1) {

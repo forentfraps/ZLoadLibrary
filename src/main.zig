@@ -5,6 +5,7 @@ const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const win = std.os.windows;
 
 pub fn main() !void {
+    std.debug.print("Starting the load", .{});
     var gpa = std.heap.DebugAllocator(.{}){};
     {
         const allocator = gpa.allocator();
@@ -19,10 +20,10 @@ pub fn main() !void {
         // try test_x64dbg(allocator);
         // test_msginteral(allocator) catch unreachable;
         try test_sxs(allocator);
-        std.debug.print("Done.\n", .{});
+        std.debug.print("Done.", .{});
     }
     // if (gpa.detectLeaks() != 0) {
-    // std.debug.print("Leaking!\n", .{});
+    // std.debug.print("Leaking!", .{});
     // }
 }
 
