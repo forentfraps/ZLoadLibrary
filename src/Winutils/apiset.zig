@@ -149,7 +149,7 @@ pub fn ApiSetResolve(apiset_name_in: []const u16, blacklist: []const []const u16
         \\mov (%rax), %rax
         : [ApiSetMap] "={rax}" (-> *ApiSetNamespaceHeader),
         :
-        : "memory");
+        : .{ .memory = true });
 
     if (ApiSetMap.version < 6 or ApiSetMap.count == 0) {
         dll.log.crit16("BAD API VERSION OR NO MAPS", .{}, apiset_name_in);

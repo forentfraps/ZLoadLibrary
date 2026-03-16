@@ -19,7 +19,8 @@ pub fn main() !void {
         }
         // try test_x64dbg(allocator);
         // test_msginteral(allocator) catch unreachable;
-        try test_sxs(allocator);
+        // try test_sxs(allocator);
+        try test_dialog(allocator);
         std.debug.print("Done.", .{});
     }
     // if (gpa.detectLeaks() != 0) {

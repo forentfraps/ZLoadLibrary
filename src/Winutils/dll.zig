@@ -9,7 +9,9 @@ const apiset = @import("apiset.zig");
 const sigscan = @import("sigscan.zig");
 const static_tls = @import("static_tls.zig");
 const seh_fix = @import("seh_fix.zig");
+const actctx = @import("actctx.zig");
 
+pub const ACTCTXW = actctx.ACTCTXW; // re-export for callers that used the old local
 pub const types = @import("win_types.zig");
 pub const str = @import("u16str.zig");
 pub const ldr = @import("ldr_utils.zig");
@@ -138,32 +140,6 @@ pub fn GetProcAddress(hModule: [*]u8, procname: [*:0]const u8) callconv(.winapi)
         if (d.BaseAddr == hModule) {
             var buf: [256]u8 = undefined;
             const up = toUpperTemp(&buf, name_slice);
-
-            // Diagnostic: trace safe-loading function lookups
-            if (std.mem.eql(u8, up, "SETDEFAULTDLLDIRECTORIES") or
-                std.mem.eql(u8, up, "ADDDLLDIRECTORY"))
-            {
-                const result = d.NameExports.get(up);
-                log.crit("SafeLoad GPA '{s}' in ", .{up});
-                log.crit16("-> ", .{}, d.Path.short.z);
-                log.crit("result: {?*}", .{result});
-                // Also print what the raw value is — forwarder string or real ptr
-                if (result) |r| {
-                    const rb: [*]const u8 = @ptrCast(r);
-                    if (str.looksLikeForwarderString(rb)) {
-                        log.crit("  ^ IS STILL A FORWARDER STRING: {s}", .{rb[0..32]});
-                    }
-                } else {
-                    log.crit("  ^ KEY NOT FOUND IN MAP", .{});
-                    // Dump all keys containing "DEFAULT" for cross-check
-                    var kit = d.NameExports.keyIterator();
-                    while (kit.next()) |k| {
-                        if (std.mem.indexOf(u8, k.*, "DEFAULT") != null)
-                            log.crit("  map has: {s}", .{k.*});
-                    }
-                }
-                return result;
-            }
 
             return d.NameExports.get(up);
         }
@@ -438,6 +414,7 @@ pub const DllLoader = struct {
     PendingInit: std.ArrayList(*Dll),
     LoadDepth: u32 = 0,
     IsFlushing: bool = false,
+    actctx_mgr: actctx.ActCtxManager,
 
     const Self = @This();
 
@@ -448,10 +425,17 @@ pub const DllLoader = struct {
                 .Allocator = allocator,
                 .InFlight = U16Set.init(allocator),
                 .PendingInit = try std.ArrayList(*Dll).initCapacity(allocator, 1),
+                .actctx_mgr = undefined,
             };
             init_logger_zload();
             const loader = &GLOBAL_DLL_LOADER;
             try loader.getLoadedDlls();
+            const k32_ = try loader.getDllByName("kernel32.dll");
+            const kb_ = try loader.getDllByName("kernelbase.dll");
+            const ntd_ = try loader.getDllByName("ntdll.dll");
+            try loader.actctx_mgr.init(allocator);
+            loader.actctx_mgr.captureRealFns(k32_, kb_, ntd_);
+            loader.actctx_mgr.patchIatAll();
             var it = loader.LoadedDlls.valueIterator();
             while (it.next()) |dll_ptr| try loader.PatchExportTableLoaderStubs(dll_ptr.*);
             try loader.resolveKnownForwarders();
@@ -462,6 +446,7 @@ pub const DllLoader = struct {
     pub fn deinit() void {
         const self = &GLOBAL_DLL_LOADER;
         const ntdll = self.getDllByName("ntdll.dll") catch null;
+        self.actctx_mgr.deinit();
         const NtFreeVirtualMemory: ?*const fn (i64, *?[*]u8, *usize, u32) callconv(.winapi) c_int = blk: {
             if (ntdll) |n| {
                 break :blk n.getProc(
@@ -510,19 +495,15 @@ pub const DllLoader = struct {
         while (it.next()) |dll_ptr| {
             const d = dll_ptr.*;
 
-            // Free NameExports — keys were heap-allocated by toUpperOwned
             var key_it = d.NameExports.keyIterator();
             while (key_it.next()) |k| self.Allocator.free(k.*);
             d.NameExports.deinit();
 
-            // OrdinalExports — no owned keys
             d.OrdinalExports.deinit();
 
-            // Path
             d.Path.deinit();
             self.Allocator.destroy(d.Path);
 
-            // Mapped memory — only free if we reflectively loaded it
             const base_addr = @intFromPtr(d.BaseAddr);
             if (!peb_bases.contains(base_addr)) {
                 if (NtFreeVirtualMemory) |free_fn| {
@@ -618,6 +599,7 @@ pub const DllLoader = struct {
                 log.info16("GetLoadedDlls ", .{}, dll_rec.Path.short.z);
 
                 try self.ResolveExports(dll_rec);
+
                 try self.LoadedDlls.put(dll_rec.Path.shortKey(), dll_rec);
             }
             if (curr == head) break;
@@ -1202,6 +1184,7 @@ pub const DllLoader = struct {
         if (dll_rec.NameExports.getPtr(k12)) |vp| vp.* = @ptrCast(@constCast(&GetModuleHandleExW_stub));
         const k13 = toUpperTemp(&tmp, "GetModuleHandleExA");
         if (dll_rec.NameExports.getPtr(k13)) |vp| vp.* = @ptrCast(@constCast(&GetModuleHandleExA_stub));
+        actctx.patchFns(dll_rec);
     }
 
     pub fn IMAGE_FIRST_SECTION(nt_headers: *align(1) const win.IMAGE_NT_HEADERS64) [*]const win.IMAGE_SECTION_HEADER {
@@ -1211,60 +1194,14 @@ pub const DllLoader = struct {
     }
 
     pub fn ExecuteDll(self: *Self, dll_rec: *Dll) !void {
-        const kernel32 = try self.getDllByName("kernel32.dll");
-        const CreateActCtxW = try kernel32.getProc(
-            fn (*anyopaque) callconv(.winapi) ?*anyopaque,
-            "CreateActCtxW",
-        );
-        const ActivateActCtx = try kernel32.getProc(
-            fn (?*anyopaque, *usize) callconv(.winapi) i32,
-            "ActivateActCtx",
-        );
-        const DeactivateActCtx = try kernel32.getProc(
-            fn (u32, usize) callconv(.winapi) i32,
-            "DeactivateActCtx",
-        );
-        const ReleaseActCtx = try kernel32.getProc(
-            fn (?*anyopaque) callconv(.winapi) void,
-            "ReleaseActCtx",
-        );
-
-        const ACTCTXW = extern struct {
-            cbSize: u32,
-            dwFlags: u32,
-            lpSource: ?*anyopaque,
-            wProcessorArchitecture: u16,
-            wLangId: u16,
-            lpAssemblyDirectory: ?*anyopaque,
-            lpResourceName: ?*anyopaque,
-            lpApplicationName: ?*anyopaque,
-            hModule: ?*anyopaque,
-        };
-
-        // Create and activate the DLL's own activation context around DllMain,
-        // mirroring what LdrpCallInitRoutine does via EntryPointActivationContext
-        var ctx = std.mem.zeroes(ACTCTXW);
-        ctx.cbSize = @sizeOf(ACTCTXW);
-        ctx.dwFlags = 0x80 | 0x20; // HMODULE_VALID | RESOURCE_NAME_VALID
-        ctx.lpResourceName = @ptrFromInt(2); // ID 2 for DLLs - plugin/isolation context
-        ctx.hModule = dll_rec.BaseAddr;
-
-        const INVALID_HANDLE: usize = ~@as(usize, 0);
-        const hActCtx = CreateActCtxW(&ctx);
-        var cookie: usize = 0;
-        const actctx_valid = hActCtx != null and @intFromPtr(hActCtx.?) != INVALID_HANDLE;
-        if (actctx_valid) _ = ActivateActCtx(hActCtx, &cookie);
-        defer {
-            if (cookie != 0) _ = DeactivateActCtx(0, cookie);
-            if (actctx_valid) ReleaseActCtx(hActCtx);
-        }
         const ntdll_dll = (try self.getDllByName("ntdll.dll"));
         const NtProtectVirtualMemory = try ntdll_dll.getProc(fn (i64, *const [*]u8, *const usize, c_int, *c_int) callconv(.winapi) c_int, "NtProtectVirtualMemory");
         const NtFlushInstructionCache = try ntdll_dll.getProc(fn (i32, ?[*]u8, usize) callconv(.winapi) c_int, "NtFlushInstructionCache");
 
         const nt_headers = try ResolveNtHeaders(dll_rec.BaseAddr);
         const sectionHeader: [*]const win.IMAGE_SECTION_HEADER = IMAGE_FIRST_SECTION(nt_headers);
-
+        var actsc = (&GLOBAL_DLL_LOADER).actctx_mgr.scopedActivate(dll_rec.BaseAddr);
+        defer actsc.end();
         var dwProtect: c_int = undefined;
         var i: usize = 0;
         while (i < nt_headers.FileHeader.NumberOfSections) : (i += 1) {
@@ -1278,7 +1215,6 @@ pub const DllLoader = struct {
         }
 
         _ = NtFlushInstructionCache(-1, null, 0);
-        // try static_tls.ldrpHandleTlsData(self, dll_rec);
         try seh_fix.rtlInsertInvertedFunctionTable(self, dll_rec);
 
         if (nt_headers.OptionalHeader.DataDirectory[@intFromEnum(win.IMAGE_DIRECTORY_ENTRY_TLS)].Size != 0) {
@@ -1309,7 +1245,6 @@ pub const DllLoader = struct {
 
         var resolved = try OwnedZ16.fromU16(self.Allocator, libname16_);
         defer resolved.deinit();
-        // Don't call canonicalUpperDll — EXEs don't need .DLL appended
         resolved.toUpperAsciiInPlace();
 
         var dllPath = (try self.getDllPaths(resolved.view())) orelse return null;
@@ -1337,7 +1272,7 @@ pub const DllLoader = struct {
 
         try ResolveRVA(base, nt, delta);
         try self.ResolveExports(dll_struct);
-
+        self.actctx_mgr.registerExe(dll_struct.BaseAddr);
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
 
         try self.PatchExportTableLoaderStubs(dll_struct);
@@ -1460,6 +1395,7 @@ pub const DllLoader = struct {
 
         try ResolveRVA(base, nt, delta);
         try self.ResolveExports(dll_struct);
+        self.actctx_mgr.registerDll(dll_struct.BaseAddr);
         try self.PatchExportTableLoaderStubs(dll_struct);
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
 
@@ -1512,6 +1448,7 @@ pub const DllLoader = struct {
 
         try ResolveRVA(base, nt, delta);
         try self.ResolveExports(dll_struct);
+        self.actctx_mgr.registerExe(dll_struct.BaseAddr);
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
         try self.PatchExportTableLoaderStubs(dll_struct);
         try self.ResolveImportTable(base, nt, dllPath, dll_struct);
@@ -1613,6 +1550,7 @@ pub const DllLoader = struct {
 
         try ResolveRVA(base, nt, delta);
         try self.ResolveExports(dll_struct);
+        self.actctx_mgr.registerDll(dll_struct.BaseAddr);
         try self.PatchExportTableLoaderStubs(dll_struct);
         try self.LoadedDlls.put(dllPath.shortKey(), dll_struct);
         self.ResolveImportTable(base, nt, dllPath, dll_struct) catch |e| {
@@ -1705,8 +1643,3 @@ pub const DllLoader = struct {
         return e;
     }
 };
-
-// ===== Re-exported from ldr_utils for callers that used to access via dll.zig =====
-
-pub const LdrpHashUnicodeString = ldr.LdrpHashUnicodeString;
-pub const getNtdllBase = ldr.getNtdllBase;
