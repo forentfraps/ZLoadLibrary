@@ -2,6 +2,10 @@ const std = @import("std");
 const str = @import("u16str.zig");
 const dll_mod = @import("dll.zig");
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Minimal PE types needed for IAT patching and resource walking
+// ─────────────────────────────────────────────────────────────────────────────
+
 const ImageDosHeader = extern struct {
     e_magic: u16,
     e_cblp: u16,
@@ -119,6 +123,10 @@ fn dataDir(base: [*]u8, index: usize) ?ImageDataDirectory {
     return d;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Public ACTCTXW
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub const ACTCTXW = extern struct {
     cbSize: u32 = @sizeOf(ACTCTXW),
     dwFlags: u32 = 0,
@@ -135,6 +143,10 @@ const INVALID_HANDLE: usize = ~@as(usize, 0);
 inline fn isInvalid(h: ?*anyopaque) bool {
     return h == null or @intFromPtr(h.?) == INVALID_HANDLE or @intFromPtr(h.?) == 0;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shadow stack
+// ─────────────────────────────────────────────────────────────────────────────
 
 const MAX_SHADOW = 128;
 const ShadowEntry = struct { handle: ?*anyopaque, cookie: usize };
@@ -162,18 +174,32 @@ fn shadowTop() ?*anyopaque {
     return if (g_depth == 0) null else g_shadow[g_depth - 1].handle;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Global
+// ─────────────────────────────────────────────────────────────────────────────
+
 var g_mgr: *ActCtxManager = undefined;
 var g_ready: bool = false;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ActCtxManager
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub const ActCtxManager = struct {
     allocator: std.mem.Allocator,
+    /// Handles we created — value is a ref count (always 1 at creation).
+    /// Lets hooks distinguish our handles from alien ones.
     owned_handles: std.AutoHashMap(usize, void),
+    /// Per-DLL provider contexts (resource ID 2).
     dll_contexts: std.AutoHashMap(usize, ?*anyopaque),
+    /// Guest EXE application context (resource ID 1). May be null if no manifest.
     active_context: ?*anyopaque,
+    /// Temp manifest files to delete on deinit.
     temp_files: std.ArrayList([:0]u16),
     real: RealFns,
 
     pub const RealFns = struct {
+        // ── Win32 actctx (from kernelbase — avoids pre-resolved forwarders) ─
         CreateActCtxW: ?*const fn (*anyopaque) callconv(.winapi) ?*anyopaque = null,
         CreateActCtxA: ?*const fn (*anyopaque) callconv(.winapi) ?*anyopaque = null,
         ActivateActCtx: ?*const fn (?*anyopaque, *usize) callconv(.winapi) i32 = null,
@@ -186,6 +212,7 @@ pub const ActCtxManager = struct {
         FindActCtxSectionGuid: ?*const fn (u32, ?*const [16]u8, u32, *const [16]u8, ?*anyopaque) callconv(.winapi) i32 = null,
         QueryActCtxW: ?*const fn (u32, ?*anyopaque, ?*anyopaque, u32, ?*anyopaque, usize, ?*usize) callconv(.winapi) i32 = null,
         ZombifyActCtx: ?*const fn (?*anyopaque) callconv(.winapi) i32 = null,
+        // ── ntdll ────────────────────────────────────────────────────────────
         RtlActivateActivationContext: ?*const fn (u32, ?*anyopaque, *usize) callconv(.winapi) i32 = null,
         RtlDeactivateActivationContext: ?*const fn (u32, usize) callconv(.winapi) void = null,
         RtlGetActiveActivationContext: ?*const fn (*?*anyopaque) callconv(.winapi) i32 = null,
@@ -196,6 +223,7 @@ pub const ActCtxManager = struct {
         RtlFindActivationContextSectionGuid: ?*const fn (u32, ?*const [16]u8, u32, *const [16]u8, ?*anyopaque) callconv(.winapi) i32 = null,
         RtlQueryInformationActivationContext: ?*const fn (u32, ?*anyopaque, ?*anyopaque, u32, ?*anyopaque, usize, ?*usize) callconv(.winapi) i32 = null,
         RtlQueryInformationActiveActivationContext: ?*const fn (u32, u32, ?*anyopaque, usize, ?*usize) callconv(.winapi) i32 = null,
+        // ── file I/O for temp manifest extraction (from kernelbase) ─────────
         NtProtectVirtualMemory: ?*const fn (i64, *?[*]u8, *usize, u32, *u32) callconv(.winapi) i32 = null,
         GetTempPathW: ?*const fn (u32, [*:0]u16) callconv(.winapi) u32 = null,
         GetTempFileNameW: ?*const fn ([*:0]const u16, [*:0]const u16, u32, [*:0]u16) callconv(.winapi) u32 = null,
@@ -204,6 +232,8 @@ pub const ActCtxManager = struct {
         CloseHandle: ?*const fn (?*anyopaque) callconv(.winapi) i32 = null,
         DeleteFileW: ?*const fn ([*:0]const u16) callconv(.winapi) i32 = null,
     };
+
+    // ── lifecycle ─────────────────────────────────────────────────────────
 
     pub fn init(self: *ActCtxManager, allocator: std.mem.Allocator) !void {
         self.* = .{
@@ -237,6 +267,16 @@ pub const ActCtxManager = struct {
         self.temp_files.deinit();
     }
 
+    // ── setup ─────────────────────────────────────────────────────────────
+
+    /// Snapshot real function pointers from unpatched export tables.
+    ///
+    /// k32   — kernel32.dll  (kept so patchFns can overwrite its export table)
+    /// kbase — kernelbase.dll (real implementations; no forwarders)
+    /// ntdll — ntdll.dll
+    ///
+    /// Must be called BEFORE resolveKnownForwarders — at init time kernel32's
+    /// actctx export entries still contain raw forwarder strings, not pointers.
     pub fn captureRealFns(self: *ActCtxManager, k32: anytype, kbase: anytype, ntdll: anytype) void {
         _ = k32;
         const G = struct {
@@ -275,6 +315,8 @@ pub const ActCtxManager = struct {
         self.real.NtProtectVirtualMemory = G.get(fn (i64, *?[*]u8, *usize, u32, *u32) callconv(.winapi) i32, ntdll, "NtProtectVirtualMemory");
     }
 
+    // ── owned handle tracking ─────────────────────────────────────────────
+
     fn trackHandle(self: *ActCtxManager, h: ?*anyopaque) void {
         if (!isInvalid(h)) self.owned_handles.put(@intFromPtr(h.?), {}) catch {};
     }
@@ -284,6 +326,8 @@ pub const ActCtxManager = struct {
         return self.owned_handles.contains(@intFromPtr(h.?));
     }
 
+    /// Create an activation context from a temp-file manifest and track the handle.
+    /// Returns null if CreateActCtxW is unavailable or fails.
     fn createContext(self: *ActCtxManager, tmp_path: [:0]const u16) ?*anyopaque {
         const fn_create = self.real.CreateActCtxW orelse return null;
         var ctx = std.mem.zeroes(ACTCTXW);
@@ -296,10 +340,16 @@ pub const ActCtxManager = struct {
         return h;
     }
 
+    // ── manifest extraction ───────────────────────────────────────────────
+
+    /// Extract the raw manifest XML (RT_MANIFEST / type 24) for the given
+    /// resource ID from a mapped PE image, write to a temp file, and return
+    /// the heap-allocated path (stored in temp_files; freed by deinit).
     fn extractManifestToTempFile(self: *ActCtxManager, base: [*]u8, resource_id: u16) ?[:0]u16 {
         const rsrc = dataDir(base, DIR_RESOURCE) orelse return null;
         const res_base: [*]const u8 = @ptrCast(base[rsrc.VirtualAddress..]);
 
+        // Level 1 — type directory, find RT_MANIFEST (24)
         const RT_MANIFEST: u32 = 24;
         const tdir: *align(1) const ImageResourceDirectory = @ptrCast(res_base);
         const tents: [*]align(1) const ImageResourceDirectoryEntry =
@@ -315,6 +365,7 @@ pub const ActCtxManager = struct {
         }
         if (type_off == 0) return null;
 
+        // Level 2 — id directory, find our resource_id
         const idir: *align(1) const ImageResourceDirectory = @ptrCast(res_base[type_off..]);
         const ients: [*]align(1) const ImageResourceDirectoryEntry =
             @ptrCast(res_base[type_off + @sizeOf(ImageResourceDirectory) ..]);
@@ -329,6 +380,7 @@ pub const ActCtxManager = struct {
         }
         if (id_off == 0) return null;
 
+        // Level 3 — language directory, take first entry
         const ldir: *align(1) const ImageResourceDirectory = @ptrCast(res_base[id_off..]);
         const lents: [*]align(1) const ImageResourceDirectoryEntry =
             @ptrCast(res_base[id_off + @sizeOf(ImageResourceDirectory) ..]);
@@ -337,6 +389,7 @@ pub const ActCtxManager = struct {
         const de: *align(1) const ImageResourceDataEntry = @ptrCast(res_base[data_off..]);
         const manifest: []const u8 = base[de.OffsetToData..][0..de.Size];
 
+        // Write to temp file
         const fn_tmppath = self.real.GetTempPathW orelse return null;
         const fn_tmpname = self.real.GetTempFileNameW orelse return null;
         const fn_create = self.real.CreateFileW orelse return null;
@@ -362,6 +415,12 @@ pub const ActCtxManager = struct {
         return out;
     }
 
+    // ── per-image registration ────────────────────────────────────────────
+
+    /// Register the guest EXE's application context (resource ID 1).
+    /// Sets active_context; used by scopedActivate for all DllMain calls.
+    /// If the EXE has no manifest, active_context stays null and DllMain
+    /// runs under whatever context is already on the TEB (correct behaviour).
     pub fn registerExe(self: *ActCtxManager, base: [*]u8) void {
         const key = @intFromPtr(base);
         const tmp_path = self.extractManifestToTempFile(base, 1) orelse return;
@@ -376,6 +435,8 @@ pub const ActCtxManager = struct {
         self.dll_contexts.put(key, h) catch {};
     }
 
+    /// Register a DLL's provider context (resource ID 2).
+    /// For QueryActCtxW / FindActCtxSection queries only.
     pub fn registerDll(self: *ActCtxManager, base: [*]u8) void {
         const key = @intFromPtr(base);
         if (self.dll_contexts.contains(key)) return;
@@ -402,6 +463,29 @@ pub const ActCtxManager = struct {
         const PAGE_READWRITE: u32 = 0x04;
         if (protect(-1, @ptrCast(&addr), &sz, PAGE_READWRITE, &old_prot) != 0) return;
         slot.* = new_fn;
+        _ = protect(-1, @ptrCast(&addr), &sz, old_prot, &old_prot);
+    }
+
+    pub fn safeWriteUsize(self: *ActCtxManager, ptr: *usize, value: usize) void {
+        const protect = self.real.NtProtectVirtualMemory orelse return;
+        var addr: ?[*]u8 = @ptrCast(ptr);
+        var sz: usize = @sizeOf(usize);
+        var old_prot: u32 = 0;
+        const PAGE_READWRITE: u32 = 0x04;
+        if (protect(-1, @ptrCast(&addr), &sz, PAGE_READWRITE, &old_prot) != 0) return;
+        ptr.* = value;
+        _ = protect(-1, @ptrCast(&addr), &sz, old_prot, &old_prot);
+    }
+
+    pub fn safeZeroBytes(self: *ActCtxManager, ptr: *anyopaque, len: usize) void {
+        if (len == 0) return;
+        const protect = self.real.NtProtectVirtualMemory orelse return;
+        var addr: ?[*]u8 = @ptrCast(ptr);
+        var sz: usize = len;
+        var old_prot: u32 = 0;
+        const PAGE_READWRITE: u32 = 0x04;
+        if (protect(-1, @ptrCast(&addr), &sz, PAGE_READWRITE, &old_prot) != 0) return;
+        @memset(@as([*]u8, @ptrCast(ptr))[0..len], 0);
         _ = protect(-1, @ptrCast(&addr), &sz, old_prot, &old_prot);
     }
 
@@ -558,16 +642,16 @@ pub fn DeactivateActCtx_hook(dwFlags: u32, ulCookie: usize) callconv(.winapi) i3
 }
 pub fn GetCurrentActCtx_hook(lphActCtx: *?*anyopaque) callconv(.winapi) i32 {
     if (!g_ready) {
-        lphActCtx.* = null;
+        g_mgr.safeWriteUsize(@ptrCast(lphActCtx), 0);
         return 0;
     }
     if (shadowTop()) |top| {
-        lphActCtx.* = top;
+        g_mgr.safeWriteUsize(@ptrCast(lphActCtx), @intFromPtr(top));
         if (!isInvalid(top)) if (g_mgr.real.AddRefActCtx) |fn_| fn_(top);
         return 1;
     }
     if (g_mgr.real.GetCurrentActCtx) |fn_| return fn_(lphActCtx);
-    lphActCtx.* = g_mgr.active_context;
+    g_mgr.safeWriteUsize(@ptrCast(lphActCtx), @intFromPtr(g_mgr.active_context));
     if (!isInvalid(g_mgr.active_context))
         if (g_mgr.real.AddRefActCtx) |fn_| fn_(g_mgr.active_context);
     return 1;
@@ -614,11 +698,11 @@ pub fn RtlDeactivateActivationContext_hook(Flags: u32, Cookie: usize) callconv(.
 pub fn RtlGetActiveActivationContext_hook(pCtx: *?*anyopaque) callconv(.winapi) i32 {
     // Fully in-house: return our managed context, never forward to ntdll.
     if (!g_ready) {
-        pCtx.* = null;
+        g_mgr.safeWriteUsize(@ptrCast(pCtx), 0);
         return @bitCast(@as(u32, 0xC000_0034));
     }
     const ctx: ?*anyopaque = shadowTop() orelse g_mgr.active_context;
-    pCtx.* = ctx;
+    g_mgr.safeWriteUsize(@ptrCast(pCtx), @intFromPtr(ctx));
     if (!isInvalid(ctx)) if (g_mgr.real.RtlAddRefActivationContext) |fn_| fn_(ctx);
     return 0; // STATUS_SUCCESS — even when ctx is null, match what ntdll does on empty TEB stack
 }
@@ -671,8 +755,8 @@ pub fn RtlQueryInformationActivationContext_hook(Flags: u32, Ctx: ?*anyopaque, S
     // No usable context: return success with zeroed/empty data.
     // Callers that check for success first (comctl32, ole32) will proceed
     // without treating an absent context as a fatal error.
-    if (RetLen) |rl| rl.* = 0;
-    if (Buf) |b| if (BufLen > 0) @memset(@as([*]u8, @ptrCast(b))[0..BufLen], 0);
+    if (RetLen) |rl| g_mgr.safeWriteUsize(@ptrCast(rl), 0);
+    if (Buf) |b| g_mgr.safeZeroBytes(b, BufLen);
     return 0; // STATUS_SUCCESS
 }
 /// Same policy for the "active context" variant — fully in-house, no ntdll call.
@@ -684,8 +768,8 @@ pub fn RtlQueryInformationActiveActivationContext_hook(Flags: u32, InfoClass: u3
             return @bitCast(@as(u32, 0xC000_0034));
         return fn_(Flags, ac, null, InfoClass, Buf, BufLen, RetLen);
     }
-    if (RetLen) |rl| rl.* = 0;
-    if (Buf) |b| if (BufLen > 0) @memset(@as([*]u8, @ptrCast(b))[0..BufLen], 0);
+    if (RetLen) |rl| g_mgr.safeWriteUsize(@ptrCast(rl), 0);
+    if (Buf) |b| g_mgr.safeZeroBytes(b, BufLen);
     return 0; // STATUS_SUCCESS
 }
 
