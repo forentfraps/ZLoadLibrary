@@ -64,3 +64,9 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+.claude/*
+.mcp.json
+.py
+.exe
+.exe.old

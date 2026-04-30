@@ -25,8 +25,8 @@
     // internet connectivity.
     .dependencies = .{
         .sys_logger = .{
-            .url = "git+https://github.com/forentfraps/sys_logger.git#899b2c9bc24fb73578a15579b91b66b5f87b29a3",
-            .hash = "sys_logger-0.0.0-2yVNLj9WAACOak9z2gLiywBrlhRF8qfC5fDD971JnnDX",
+            .url = "git+https://github.com/forentfraps/sys_logger.git#5d02c6672f6009163be84c216c77599510a22aa5",
+            .hash = "sys_logger-0.0.0-2yVNLrNiAACQB5x9PQNa8A6Tn4QSNpud14EbbMYeq3H8",
         },
         .syscall_manager = .{
             .url = "git+https://github.com/forentfraps/syscall_manager.git#2ce6ef27d1392bc51803b4ca26b795d533a4120c",

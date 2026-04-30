@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <commdlg.h>
+#include <stdio.h>
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     PWSTR pCmdLine, int nCmdShow) {
@@ -20,6 +21,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
   if (!GetOpenFileNameW(&ofn)) {
     MessageBoxW(NULL, L"No file selected.", L"Info", MB_OK);
+    int c = CommDlgExtendedError();
+    printf("Error is %x\n", c);
     return 0;
   }
 
