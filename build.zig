@@ -52,7 +52,6 @@ pub fn build(b: *std.Build) void {
 
     const dllmain_lib = b.addLibrary(.{
         .name = "ZLoadLibrary",
-        .linkage = .dynamic,
         .root_module = dllmain_mod,
     });
     b.installArtifact(dllmain_lib);
