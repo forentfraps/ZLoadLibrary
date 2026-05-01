@@ -37,6 +37,26 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    const dllmain_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    dllmain_mod.addIncludePath(b.path("src/Winutils/sig_headers"));
+    dllmain_mod.strip = false;
+    dllmain_mod.error_tracing = true;
+    dllmain_mod.addImport("zigwin32", zigwin32_module);
+    dllmain_mod.addImport("syscall_manager", syscall_module);
+    dllmain_mod.addImport("sys_logger", sys_logger_module);
+
+    const dllmain_lib = b.addLibrary(.{
+        .name = "ZLoadLibrary",
+        .linkage = .dynamic,
+        .root_module = dllmain_mod,
+    });
+    b.installArtifact(dllmain_lib);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);

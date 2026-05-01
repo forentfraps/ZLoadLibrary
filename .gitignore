@@ -70,3 +70,5 @@ dkms.conf
 .py
 .exe
 .exe.old
+.log
+.txt

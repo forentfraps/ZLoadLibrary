@@ -1,10 +1,13 @@
 const std = @import("std");
-const testing = std.testing;
+const dll = @import("Winutils/dll.zig");
 
-export fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try testing.expect(add(3, 7) == 10);
+export fn DllMain(hInstance: *anyopaque, fdReason: c_int, reserved: *anyopaque) callconv(.winapi) c_long {
+    _ = reserved;
+    _ = fdReason;
+    _ = hInstance;
+    var gpa = std.heap.DebugAllocator(.{}){};
+    const allocator = gpa.allocator();
+    dll.init_logger_zload();
+    dll.DllLoader.init(allocator) catch unreachable;
+    return 1;
 }
